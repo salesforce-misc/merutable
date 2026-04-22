@@ -217,9 +217,25 @@ fn encode_field(val: &FieldValue, col_type: &ColumnType, buf: &mut Vec<u8>) -> R
             buf.extend_from_slice(&((*v as u64) ^ 0x8000_0000_0000_0000_u64).to_be_bytes());
         }
         (FieldValue::Float(v), ColumnType::Float) => {
+            if v.is_nan() {
+                return Err(MeruError::InvalidArgument(
+                    "NaN is not allowed in primary key columns (Float): \
+                     IEEE 754 NaN has multiple bit representations, \
+                     producing non-deterministic key encoding"
+                        .into(),
+                ));
+            }
             buf.extend_from_slice(&order_preserving_f32(*v));
         }
         (FieldValue::Double(v), ColumnType::Double) => {
+            if v.is_nan() {
+                return Err(MeruError::InvalidArgument(
+                    "NaN is not allowed in primary key columns (Double): \
+                     IEEE 754 NaN has multiple bit representations, \
+                     producing non-deterministic key encoding"
+                        .into(),
+                ));
+            }
             buf.extend_from_slice(&order_preserving_f64(*v));
         }
         (FieldValue::Bytes(b), ColumnType::FixedLenByteArray(n)) => {
@@ -741,6 +757,81 @@ mod tests {
         let pos =
             InternalKey::encode(&[FieldValue::Float(1.0)], SeqNum(0), OpType::Put, &s).unwrap();
         assert!(neg < pos);
+    }
+
+    /// Issue #49 regression: NaN must be rejected in Float PK columns.
+    /// IEEE 754 defines multiple NaN bit patterns; the order-preserving
+    /// encoding faithfully maps them to different byte sequences,
+    /// producing non-deterministic keys for the same semantic value.
+    #[test]
+    fn nan_float_pk_rejected() {
+        let s = TableSchema {
+            table_name: "t".into(),
+            columns: vec![ColumnDef {
+                name: "f".into(),
+                col_type: ColumnType::Float,
+                nullable: false,
+                ..Default::default()
+            }],
+            primary_key: vec![0],
+            ..Default::default()
+        };
+        let err = InternalKey::encode(&[FieldValue::Float(f32::NAN)], SeqNum(1), OpType::Put, &s)
+            .unwrap_err();
+        match err {
+            MeruError::InvalidArgument(msg) => assert!(msg.contains("NaN"), "msg: {msg}"),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    /// Issue #49 regression: NaN must be rejected in Double PK columns.
+    #[test]
+    fn nan_double_pk_rejected() {
+        let s = TableSchema {
+            table_name: "t".into(),
+            columns: vec![ColumnDef {
+                name: "d".into(),
+                col_type: ColumnType::Double,
+                nullable: false,
+                ..Default::default()
+            }],
+            primary_key: vec![0],
+            ..Default::default()
+        };
+        let err = InternalKey::encode(&[FieldValue::Double(f64::NAN)], SeqNum(1), OpType::Put, &s)
+            .unwrap_err();
+        match err {
+            MeruError::InvalidArgument(msg) => assert!(msg.contains("NaN"), "msg: {msg}"),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    /// Non-NaN floats (including ±0, ±inf, subnormals) must encode fine.
+    #[test]
+    fn non_nan_floats_encode_fine() {
+        let s = TableSchema {
+            table_name: "t".into(),
+            columns: vec![ColumnDef {
+                name: "d".into(),
+                col_type: ColumnType::Double,
+                nullable: false,
+                ..Default::default()
+            }],
+            primary_key: vec![0],
+            ..Default::default()
+        };
+        for v in [
+            0.0_f64,
+            -0.0,
+            1.0,
+            -1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+        ] {
+            InternalKey::encode(&[FieldValue::Double(v)], SeqNum(1), OpType::Put, &s)
+                .unwrap_or_else(|e| panic!("encoding {v} should succeed: {e}"));
+        }
     }
 
     #[test]
