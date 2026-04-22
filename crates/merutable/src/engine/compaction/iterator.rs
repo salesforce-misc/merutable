@@ -92,8 +92,17 @@ impl CompactionIterator {
             last_uk = Some(uk);
             seen_latest = true;
 
-            // Drop tombstones if allowed.
-            if drop_tombstones && entry.ikey.op_type == OpType::Delete {
+            // Drop tombstones at the bottom level only when no active
+            // snapshot reader could need this tombstone to shadow an
+            // older Put. If the tombstone's seq >= oldest_snapshot_seq,
+            // a reader pinned at that watermark would see the tombstone
+            // as the latest version — dropping it would un-delete the
+            // key if an older Put with seq >= oldest_snapshot_seq also
+            // survives the dedup filter above.
+            if drop_tombstones
+                && entry.ikey.op_type == OpType::Delete
+                && entry.ikey.seq < oldest_snapshot_seq
+            {
                 continue;
             }
 
@@ -261,5 +270,57 @@ mod tests {
                                       // Key 1 should come from file 0 (seq=10, newer).
         assert_eq!(results[0].ikey.seq, SeqNum(10));
         assert_eq!(results[0].source_file_idx, 0);
+    }
+
+    /// Issue #48 regression: tombstone must NOT be dropped at the
+    /// bottom level when a snapshot-pinned older Put for the same key
+    /// would survive the dedup filter. Dropping the tombstone while
+    /// older Puts remain resurrects the deleted key — data corruption.
+    #[test]
+    fn tombstone_preserved_when_snapshot_pins_older_put() {
+        // Key 1: Put@5, Put@10, Delete@15. oldest_snapshot_seq=3.
+        // With drop_tombstones=true, the Delete@15 must be KEPT
+        // because Put@10 and Put@5 both have seq >= 3 and survive
+        // the dedup filter — without the tombstone they'd appear
+        // as live data.
+        let fe = vec![FileEntries {
+            file_idx: 0,
+            entries: vec![
+                (make_ikey(1, 15, OpType::Delete), Row::default(), 0),
+                (make_ikey(1, 10, OpType::Put), Row::default(), 1),
+                (make_ikey(1, 5, OpType::Put), Row::default(), 2),
+            ],
+        }];
+        let iter = CompactionIterator::new(fe, SeqNum(3), true);
+        let results: Vec<_> = iter.collect();
+        // All three must survive: Delete@15 shadows Put@10/Put@5.
+        assert_eq!(
+            results.len(),
+            3,
+            "tombstone must be preserved when snapshot-pinned older Puts survive"
+        );
+        assert_eq!(results[0].ikey.op_type, OpType::Delete);
+        assert_eq!(results[0].ikey.seq, SeqNum(15));
+    }
+
+    /// When oldest_snapshot_seq is high enough that no older Puts
+    /// survive, tombstone CAN be dropped (all versions collapse).
+    #[test]
+    fn tombstone_dropped_when_no_pinned_versions() {
+        let fe = vec![FileEntries {
+            file_idx: 0,
+            entries: vec![
+                (make_ikey(1, 15, OpType::Delete), Row::default(), 0),
+                (make_ikey(1, 10, OpType::Put), Row::default(), 1),
+                (make_ikey(2, 8, OpType::Put), Row::default(), 2),
+            ],
+        }];
+        // oldest_snapshot_seq=100: both Delete@15 and Put@10 have
+        // seq < 100, so the tombstone is safe to drop and the old
+        // Put is dropped by dedup.
+        let iter = CompactionIterator::new(fe, SeqNum(100), true);
+        let results: Vec<_> = iter.collect();
+        assert_eq!(results.len(), 1, "only key=2 should survive");
+        assert_eq!(results[0].ikey.seq, SeqNum(8));
     }
 }
