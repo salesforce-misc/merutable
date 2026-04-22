@@ -1,11 +1,16 @@
 [package]
-name        = "merutable"
-version     = "0.1.0"
-edition     = "2021"
-description = "Embeddable single-table engine: row + columnar Parquet with Iceberg-compatible metadata"
-keywords    = ["embedded", "lsm", "iceberg", "parquet", "table"]
-license     = "Apache-2.0"
-build       = "build.rs"
+name          = "merutable"
+version       = "0.0.1"
+edition       = "2021"
+description   = "Embeddable single-table engine: row + columnar Parquet with Iceberg-compatible metadata"
+keywords      = ["embedded", "lsm", "iceberg", "parquet", "table"]
+license       = "Apache-2.0"
+repository    = "https://github.com/merutable/merutable"
+homepage      = "https://github.com/merutable/merutable"
+documentation = "https://docs.rs/merutable"
+readme        = "../../README.md"
+categories    = ["database-implementations", "data-structures"]
+build         = "build.rs"
 
 # Issue #38: this crate is the single published artifact for
 # merutable. The `sql` and `replica` modules are feature-gated so
