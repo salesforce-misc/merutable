@@ -97,6 +97,15 @@ pub struct MirrorWorker {
     /// non-async context — a metrics exporter thread — doesn't need
     /// access to the tokio runtime.
     last_upload_unix_secs: Arc<AtomicI64>,
+    /// Issue #55: fired after every successful upload (mirror_seq
+    /// advance). `await_mirror()` registers on this BEFORE kicking
+    /// the worker, so the notification is never lost.
+    mirror_advanced: Arc<Notify>,
+    /// Issue #55: kick the worker to tick immediately instead of
+    /// sleeping up to POLL_INTERVAL. `await_mirror()` fires this
+    /// so the caller doesn't waste up to 5 seconds waiting for the
+    /// next natural poll.
+    wake: Arc<Notify>,
 }
 
 impl MirrorWorker {
@@ -108,12 +117,18 @@ impl MirrorWorker {
         let shutdown_notify = Arc::new(Notify::new());
         let mirror_seq = Arc::new(AtomicI64::new(0));
         let last_upload = Arc::new(AtomicI64::new(0));
-        let flag = shutdown_flag.clone();
-        let notify = shutdown_notify.clone();
-        let seq = mirror_seq.clone();
-        let last = last_upload.clone();
+        let mirror_advanced = Arc::new(Notify::new());
+        let wake = Arc::new(Notify::new());
+        let state = MirrorLoopState {
+            shutdown_flag: shutdown_flag.clone(),
+            shutdown_notify: shutdown_notify.clone(),
+            mirror_seq: mirror_seq.clone(),
+            last_upload_unix_secs: last_upload.clone(),
+            mirror_advanced: mirror_advanced.clone(),
+            wake: wake.clone(),
+        };
         let handle = tokio::spawn(async move {
-            mirror_loop(engine, config, flag, notify, seq, last).await;
+            mirror_loop(engine, config, state).await;
         });
         Self {
             shutdown_flag,
@@ -121,6 +136,8 @@ impl MirrorWorker {
             handle: Some(handle),
             mirror_seq,
             last_upload_unix_secs: last_upload,
+            mirror_advanced,
+            wake,
         }
     }
 
@@ -149,6 +166,18 @@ impl MirrorWorker {
         Some((now - last).max(0) as u64)
     }
 
+    /// Issue #55: cloned Arc accessors so `MeruDB::await_mirror()`
+    /// can drop the Mutex guard before entering the await loop.
+    pub(crate) fn mirror_seq_arc(&self) -> Arc<AtomicI64> {
+        self.mirror_seq.clone()
+    }
+    pub(crate) fn mirror_advanced_arc(&self) -> Arc<Notify> {
+        self.mirror_advanced.clone()
+    }
+    pub(crate) fn wake_arc(&self) -> Arc<Notify> {
+        self.wake.clone()
+    }
+
     /// Signal the worker to shut down and await its exit.
     ///
     /// Ordering matches `BackgroundWorkers::shutdown`:
@@ -164,14 +193,26 @@ impl MirrorWorker {
     }
 }
 
-async fn mirror_loop(
-    engine: Arc<MeruEngine>,
-    config: MirrorConfig,
+/// Shared state passed to the mirror loop. Bundled to avoid
+/// exceeding clippy's `too_many_arguments` threshold.
+struct MirrorLoopState {
     shutdown_flag: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     mirror_seq: Arc<AtomicI64>,
     last_upload_unix_secs: Arc<AtomicI64>,
-) {
+    mirror_advanced: Arc<Notify>,
+    wake: Arc<Notify>,
+}
+
+async fn mirror_loop(engine: Arc<MeruEngine>, config: MirrorConfig, state: MirrorLoopState) {
+    let MirrorLoopState {
+        shutdown_flag,
+        shutdown_notify,
+        mirror_seq,
+        last_upload_unix_secs,
+        mirror_advanced,
+        wake,
+    } = state;
     info!("mirror worker started (Issue #31 Phase 2b — observe + upload)");
     let catalog_path = PathBuf::from(engine.catalog_path());
     let mut last_uploaded: i64 = 0;
@@ -194,6 +235,9 @@ async fn mirror_loop(
                     );
                     last_uploaded = current;
                     mirror_seq.store(current, Ordering::Relaxed);
+                    // Issue #55: wake any await_mirror() callers
+                    // blocked on this advance.
+                    mirror_advanced.notify_waiters();
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -244,14 +288,13 @@ async fn mirror_loop(
             }
         }
 
-        // Wait for either the poll interval or an explicit shutdown
-        // notification. We do NOT register the `notified` future
-        // before checking the flag, so a shutdown issued while we
-        // were computing the `current` snapshot is caught on the
-        // next loop-top flag check rather than being silently lost.
+        // Wait for either the poll interval, an explicit shutdown, or
+        // a wake kick from await_mirror(). The wake branch lets
+        // callers avoid the up-to-POLL_INTERVAL latency.
         tokio::select! {
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
             _ = shutdown_notify.notified() => {}
+            _ = wake.notified() => {}
         }
     }
     info!(last_uploaded_seq = last_uploaded, "mirror worker shut down");

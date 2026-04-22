@@ -370,6 +370,52 @@ impl MeruDB {
         guard.as_ref().and_then(|w| w.mirror_lag_secs())
     }
 
+    /// Issue #55: wait until the mirror worker has uploaded at least
+    /// through the current snapshot. Returns the mirrored snapshot id.
+    ///
+    /// Captures `current_snapshot_id()` at call time and blocks until
+    /// `mirror_seq >= target`. Kicks the worker immediately so the
+    /// caller doesn't waste up to `POLL_INTERVAL` (5 s) waiting for
+    /// the next natural tick.
+    ///
+    /// Returns `InvalidArgument` if no mirror is configured;
+    /// `Closed` if the engine shuts down while waiting.
+    pub async fn await_mirror(&self) -> crate::types::Result<i64> {
+        let target = self.engine.current_snapshot_id();
+        if target <= 0 {
+            return Ok(0);
+        }
+        // Clone the Arcs we need, then drop the Mutex guard so
+        // mirror_seq() and other callers aren't blocked for the
+        // duration of the wait.
+        let (seq_arc, advanced, wake) = {
+            let guard = self.mirror_worker.lock().await;
+            let worker = guard.as_ref().ok_or_else(|| {
+                crate::types::MeruError::InvalidArgument("no mirror configured".into())
+            })?;
+            (
+                worker.mirror_seq_arc(),
+                worker.mirror_advanced_arc(),
+                worker.wake_arc(),
+            )
+        };
+        loop {
+            let current = seq_arc.load(std::sync::atomic::Ordering::Relaxed);
+            if current >= target {
+                return Ok(current);
+            }
+            if self.engine.is_closed() {
+                return Err(crate::types::MeruError::Closed);
+            }
+            // Register BEFORE waking the worker — if the worker
+            // uploads and fires notify_waiters before we park,
+            // the notification is lost (Bug Z pattern).
+            let notified = advanced.notified();
+            wake.notify_one();
+            notified.await;
+        }
+    }
+
     /// Catalog base directory path (for external analytics file access).
     pub fn catalog_path(&self) -> String {
         self.engine.catalog_path()
@@ -893,6 +939,89 @@ mod tests {
         // fired depending on test timing), but the method must keep
         // returning Some — the worker still exists as an Option
         // until close takes it.
+        db.close().await.unwrap();
+    }
+
+    /// Issue #55 regression: await_mirror returns InvalidArgument
+    /// when no mirror is configured.
+    #[tokio::test]
+    async fn await_mirror_no_mirror_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp)).await.unwrap();
+        // Write + flush so snapshot_id > 0.
+        db.put(make_row(1, "v")).await.unwrap();
+        db.flush().await.unwrap();
+        let err = db.await_mirror().await.unwrap_err();
+        match err {
+            crate::types::MeruError::InvalidArgument(msg) => {
+                assert!(msg.contains("mirror"), "msg: {msg}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Issue #55 regression: await_mirror blocks until the mirror
+    /// worker uploads the current snapshot, then returns the mirrored
+    /// snapshot id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn await_mirror_blocks_until_synced() {
+        use crate::options::MirrorConfig;
+        use crate::store::local::LocalFileStore;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalFileStore::new(mirror_dir.path()).unwrap());
+        let opts = test_options(&tmp).mirror(MirrorConfig::new(store.clone()));
+        let db = MeruDB::open(opts).await.unwrap();
+
+        // Write data and flush to create a committed snapshot.
+        for i in 1..=5i64 {
+            db.put(make_row(i, &format!("v{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        let snapshot_id = db.engine.current_snapshot_id();
+        assert!(snapshot_id > 0, "flush must commit a snapshot");
+
+        // await_mirror must return >= snapshot_id, not block forever.
+        let mirrored = tokio::time::timeout(std::time::Duration::from_secs(15), db.await_mirror())
+            .await
+            .expect("await_mirror must not block indefinitely")
+            .expect("await_mirror must succeed");
+        assert!(
+            mirrored >= snapshot_id,
+            "mirrored seq ({mirrored}) must be >= snapshot ({snapshot_id})"
+        );
+
+        // Verify the manifest was actually uploaded.
+        let manifest_path = format!("metadata/v{snapshot_id}.manifest.bin");
+        assert!(
+            mirror_dir.path().join(&manifest_path).exists(),
+            "mirror must have uploaded {manifest_path}"
+        );
+
+        db.close().await.unwrap();
+    }
+
+    /// Issue #55: await_mirror on a fresh DB with no committed
+    /// snapshot returns immediately with 0.
+    #[tokio::test]
+    async fn await_mirror_no_snapshot_returns_zero() {
+        use crate::options::MirrorConfig;
+        use crate::store::local::LocalFileStore;
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalFileStore::new(mirror_dir.path()).unwrap());
+        let opts = test_options(&tmp).mirror(MirrorConfig::new(store));
+        let db = MeruDB::open(opts).await.unwrap();
+
+        // No writes, no flush — snapshot_id is 0.
+        let result = db.await_mirror().await.unwrap();
+        assert_eq!(result, 0, "no snapshot committed, should return 0");
+
         db.close().await.unwrap();
     }
 
