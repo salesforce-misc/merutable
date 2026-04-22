@@ -145,14 +145,10 @@ pub async fn apply_batch(engine: &Arc<MeruEngine>, batch: MutationBatch) -> Resu
             user_keys.push(user_key_bytes.clone());
         }
         let value_bytes = match mutation.op_type {
-            OpType::Put => mutation
-                .row
-                .as_ref()
-                .map(|r| {
-                    let encoded = codec::encode_row(r).unwrap_or_default();
-                    Bytes::from(encoded)
-                })
-                .unwrap_or_default(),
+            OpType::Put => match mutation.row.as_ref() {
+                Some(r) => Bytes::from(codec::encode_row(r)?),
+                None => Bytes::new(),
+            },
             // Issue #33 fix: capture the delete pre-image at write
             // time instead of reconstructing post-hoc via
             // point_lookup_at(seq-1). The reconstruction approach
@@ -179,7 +175,7 @@ pub async fn apply_batch(engine: &Arc<MeruEngine>, batch: MutationBatch) -> Resu
                 let pre_image =
                     crate::engine::read_path::point_lookup(engine, &mutation.pk_values)?;
                 match pre_image {
-                    Some(row) => Bytes::from(codec::encode_row(&row).unwrap_or_default()),
+                    Some(row) => Bytes::from(codec::encode_row(&row)?),
                     None => Bytes::new(),
                 }
             }
@@ -387,11 +383,30 @@ mod tests {
 
         apply_batch(&engine, batch).await.unwrap();
 
-        // Both keys should be readable.
-        let row1 = engine.get(&[FieldValue::Int64(42)]).unwrap();
-        assert!(row1.is_some());
-        let row2 = engine.get(&[FieldValue::Int64(99)]).unwrap();
-        assert!(row2.is_some());
+        // Issue #46 regression: verify actual field VALUES, not just
+        // existence. The old code used unwrap_or_default() on
+        // encode_row, which would silently produce empty bytes on
+        // failure. decode_row("") returns Row::default() — an empty
+        // row that is_some(). Checking only is_some() would not catch
+        // the data loss.
+        let row1 = engine
+            .get(&[FieldValue::Int64(42)])
+            .unwrap()
+            .expect("key 42 must exist");
+        assert_eq!(
+            row1.get(1).cloned(),
+            Some(FieldValue::Bytes(bytes::Bytes::from("hello"))),
+            "key 42 value must round-trip through batch encode path"
+        );
+        let row2 = engine
+            .get(&[FieldValue::Int64(99)])
+            .unwrap()
+            .expect("key 99 must exist");
+        assert_eq!(
+            row2.get(1).cloned(),
+            Some(FieldValue::Bytes(bytes::Bytes::from("world"))),
+            "key 99 value must round-trip through batch encode path"
+        );
     }
 
     /// Regression: a multi-record `MutationBatch` must advance `global_seq`
