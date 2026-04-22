@@ -9,12 +9,14 @@ resolver = "2"
 members = [
     "crates/merutable",
     "crates/merutable-python",
+    "crates/merutable-capi",
 ]
 # merutable-python requires Python dev headers + PyO3; exclude from
 # default `cargo test/clippy --workspace` so CI doesn't need Python.
 # Build it explicitly via `maturin develop` (see lab/setup.sh).
 default-members = [
     "crates/merutable",
+    "crates/merutable-capi",
 ]
 
 [workspace.dependencies]

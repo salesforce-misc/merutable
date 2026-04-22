@@ -1,0 +1,16 @@
+[package]
+name    = "merutable-capi"
+version = "0.1.0"
+edition = "2021"
+description = "C ABI bindings for merutable"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+merutable = { path = "../merutable" }
+tokio     = { workspace = true }
+bytes     = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.27"

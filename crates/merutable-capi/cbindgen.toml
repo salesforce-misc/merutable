@@ -1,0 +1,34 @@
+language = "C"
+include_guard = "MERUTABLE_H"
+documentation = true
+tab_width = 4
+style = "type"
+
+[export]
+include = [
+    "MeruStatus",
+    "MeruColumnType",
+    "MeruBytesView",
+    "MeruValueInner",
+    "MeruValue",
+    "MeruRow",
+    "MeruColumnDef",
+    "MeruSchema",
+    "MeruOpenOptions",
+    "MeruScanResult",
+    "MeruMemtableStats",
+    "MerucacheStats",
+    "MeruStats",
+]
+
+[export.rename]
+"MerucacheStats" = "MeruCacheStats"
+
+[parse]
+parse_deps = false
+
+[enum]
+prefix_with_name = true
+
+[fn]
+prefix = "extern"
