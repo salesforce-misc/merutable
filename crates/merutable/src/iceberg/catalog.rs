@@ -25,11 +25,12 @@
 //! the hot path.
 //!
 //! The on-disk layout is **losslessly translatable** to a real Apache
-//! Iceberg v2 table via [`crate::iceberg::translate`]. The translator can be run
-//! online (to expose the catalog to pyiceberg / Spark / Trino / DuckDB /
-//! Snowflake) or offline (as a one-shot migration). See the translate
-//! module's docs for the mapping from merutable fields to Iceberg spec
-//! fields.
+//! Iceberg v2 table via [`crate::iceberg::translate`] and the
+//! [`IcebergCatalog::export_to_iceberg`] method. The export produces a
+//! complete Iceberg v2 table — `metadata.json` + manifest-list Avro +
+//! manifest Avro — that DuckDB, pyiceberg, Spark, Trino, Snowflake,
+//! and Athena can read directly. See the translate module's docs for
+//! the mapping from merutable fields to Iceberg spec fields.
 
 use std::{
     collections::HashMap,
@@ -593,40 +594,33 @@ impl IcebergCatalog {
         Ok(())
     }
 
-    /// Export the current catalog snapshot as an Apache Iceberg v2
-    /// `metadata.json` file.
+    /// Export the current catalog snapshot as a complete Apache Iceberg v2
+    /// table: `metadata.json` + manifest-list Avro + manifest Avro.
     ///
     /// This is the **enabler artifact** for Iceberg interop: it projects
     /// the in-memory `Manifest` onto the Iceberg v2 `TableMetadata` shape
-    /// (see [`crate::iceberg::translate`]) and writes the result to
-    /// `{target_dir}/metadata/v{N}.metadata.json` alongside a
-    /// `version-hint.text` file pointing at it.
+    /// (see [`crate::iceberg::translate`]) and writes:
     ///
-    /// # Use cases
+    /// 1. `{target_dir}/metadata/v{N}.metadata.json` — Iceberg v2 table
+    ///    metadata referencing the manifest-list.
+    /// 2. `{target_dir}/metadata/snap-{N}-0-{uuid}.avro` — manifest-list
+    ///    Avro file containing one entry per manifest.
+    /// 3. `{target_dir}/metadata/{uuid}-m0.avro` — manifest Avro file
+    ///    listing every live data file.
+    /// 4. `{target_dir}/version-hint.text` — pointer to the latest
+    ///    metadata version.
     ///
-    /// - **Register with an external catalog.** After calling this,
-    ///   a pyiceberg / Spark / Trino / DuckDB / Snowflake / Athena
-    ///   client can load the exported directory as an Iceberg v2 table
-    ///   (read-only; data files live under the original `base_path`).
-    /// - **Lineage / audit.** Diff two exported metadata.json files
-    ///   across snapshots to see schema evolution, snapshot history,
-    ///   and sequence-number progression in Iceberg-spec terms.
-    /// - **One-shot migration.** Call once at end-of-life to hand the
-    ///   table over to a different stack without re-writing the data.
+    /// After this call, a DuckDB `iceberg_scan('{target_dir}')`, pyiceberg,
+    /// Spark, Trino, Snowflake, or Athena client can read the table
+    /// (read-only; data files live under the original `base_path`).
     ///
-    /// # Current limitation
+    /// # Path resolution
     ///
-    /// This writes the `TableMetadata` JSON but **not** the accompanying
-    /// manifest-list Avro or manifest Avro files that a full Iceberg
-    /// table requires for data-file discovery. A v2 reader that tries
-    /// to list files will follow the `manifest-list` path referenced in
-    /// the exported snapshot and fail to find the Avro file.
-    ///
-    /// For inspection-only workflows (catalog registration, lineage,
-    /// schema audit), this JSON is sufficient. For full data-read
-    /// interop, use the exported metadata as a starting point and emit
-    /// the Avro manifest files separately (tracked as follow-on work;
-    /// see `translate.rs` for the field mapping helpers).
+    /// Data file paths in the manifest Avro are absolute URIs rooted at
+    /// the catalog's `base_path` (e.g. `file:///db/data/L0/a.parquet`).
+    /// Manifest and manifest-list paths are absolute URIs under
+    /// `target_dir`. This allows `target_dir != base_path` — the export
+    /// directory holds Iceberg metadata while data files remain in-place.
     pub async fn export_to_iceberg(&self, target_dir: impl AsRef<Path>) -> Result<PathBuf> {
         let target = target_dir.as_ref().to_path_buf();
         let meta_dir = target.join("metadata");
@@ -648,10 +642,41 @@ impl IcebergCatalog {
             .unwrap_or_else(|_| self.base_path.clone());
         let table_location = format!("file://{}", canonical.display());
 
-        let json = crate::iceberg::translate::to_iceberg_v2_table_metadata_bytes(
-            &manifest,
-            &table_location,
-        )?;
+        // Canonical target for Avro file URIs.
+        let canonical_target = tokio::fs::canonicalize(&target)
+            .await
+            .unwrap_or_else(|_| target.clone());
+        let target_uri = format!("file://{}", canonical_target.display());
+
+        // ── Issue #54: Avro manifest + manifest-list ────────────────
+
+        // Write manifest Avro and manifest-list Avro so that downstream
+        // engines (DuckDB iceberg_scan, pyiceberg, Spark) can discover
+        // data files through the standard Iceberg read path.
+        let manifest_list_avro_path = self
+            .write_iceberg_avro_manifests(&manifest, &table_location, &target_uri)
+            .await?;
+
+        // ── metadata.json ───────────────────────────────────────────
+
+        // Build the metadata JSON. The manifest-list path inside the
+        // snapshot must point to the Avro file we just wrote (under
+        // target_dir), not to the default path derived from
+        // table_location.
+        let mut metadata_value =
+            crate::iceberg::translate::to_iceberg_v2_table_metadata(&manifest, &table_location);
+        // Patch the manifest-list path in the snapshot to point at the
+        // actual Avro file under target_dir.
+        if let Some(snap) = metadata_value
+            .get_mut("snapshots")
+            .and_then(|s| s.as_array_mut())
+            .and_then(|a| a.first_mut())
+        {
+            snap["manifest-list"] = serde_json::json!(manifest_list_avro_path);
+        }
+
+        let json = serde_json::to_vec_pretty(&metadata_value)
+            .map_err(|e| MeruError::Iceberg(format!("iceberg metadata serialize: {e}")))?;
 
         let out_path = meta_dir.join(format!("v{}.metadata.json", manifest.snapshot_id));
         tokio::fs::write(&out_path, &json)
@@ -680,9 +705,128 @@ impl IcebergCatalog {
             target = %target.display(),
             snapshot_id = manifest.snapshot_id,
             table_uuid = %manifest.table_uuid,
-            "exported Iceberg v2 metadata"
+            "exported Iceberg v2 table (metadata.json + Avro manifests)"
         );
         Ok(out_path)
+    }
+
+    /// Issue #54: write the manifest Avro and manifest-list Avro files
+    /// using the iceberg-rs crate's `ManifestWriter` and
+    /// `ManifestListWriter`. Returns the absolute URI of the
+    /// manifest-list Avro file (for embedding in metadata.json).
+    async fn write_iceberg_avro_manifests(
+        &self,
+        manifest: &Manifest,
+        table_location: &str,
+        target_uri: &str,
+    ) -> Result<String> {
+        use std::sync::Arc;
+
+        // Convert merutable schema → iceberg-rs Schema.
+        let iceberg_schema = crate::iceberg::translate::to_iceberg_rs_schema(&manifest.schema)?;
+        let iceberg_schema_ref = Arc::new(iceberg_schema);
+
+        // Unpartitioned partition spec.
+        let partition_spec = iceberg::spec::PartitionSpec::builder(iceberg_schema_ref.clone())
+            .with_spec_id(0)
+            .build()
+            .map_err(|e| MeruError::Iceberg(format!("partition spec build: {e}")))?;
+
+        // Manifest metadata.
+        let metadata = iceberg::spec::ManifestMetadata::builder()
+            .schema(iceberg_schema_ref)
+            .schema_id(0)
+            .partition_spec(partition_spec)
+            .format_version(iceberg::spec::FormatVersion::V2)
+            .content(iceberg::spec::ManifestContentType::Data)
+            .build();
+
+        // Build manifest entries from merutable's live files.
+        let entries: Vec<iceberg::spec::ManifestEntry> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.status != "deleted")
+            .map(|e| {
+                let status = match e.status.as_str() {
+                    "added" => iceberg::spec::ManifestStatus::Added,
+                    _ => iceberg::spec::ManifestStatus::Existing,
+                };
+                // Data file paths are absolute URIs rooted at the
+                // catalog's base_path so DuckDB / pyiceberg can
+                // resolve them without knowing the original base.
+                let file_path = format!("{}/{}", table_location.trim_end_matches('/'), e.path);
+                let data_file = iceberg::spec::DataFileBuilder::default()
+                    .content(iceberg::spec::DataContentType::Data)
+                    .file_path(file_path)
+                    .file_format(iceberg::spec::DataFileFormat::Parquet)
+                    .file_size_in_bytes(e.meta.file_size)
+                    .record_count(e.meta.num_rows)
+                    .partition(iceberg::spec::Struct::from_iter(std::iter::empty::<
+                        Option<iceberg::spec::Literal>,
+                    >()))
+                    .build()
+                    .map_err(|e| MeruError::Iceberg(format!("data file build: {e}")))?;
+                Ok(iceberg::spec::ManifestEntry::builder()
+                    .status(status)
+                    .snapshot_id(manifest.snapshot_id)
+                    .sequence_number(manifest.sequence_number)
+                    .file_sequence_number(manifest.sequence_number)
+                    .data_file(data_file)
+                    .build())
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let iceberg_manifest = iceberg::spec::Manifest::new(metadata, entries);
+
+        // Local filesystem I/O for writing Avro files.
+        let file_io = iceberg::io::FileIOBuilder::new_fs_io()
+            .build()
+            .map_err(|e| MeruError::Iceberg(format!("FileIO build: {e}")))?;
+
+        // ── Write manifest Avro ─────────────────────────────────────
+        let manifest_uuid = uuid::Uuid::new_v4().to_string();
+        let manifest_filename = format!("{manifest_uuid}-m0.avro");
+        let manifest_avro_uri = format!(
+            "{}/metadata/{manifest_filename}",
+            target_uri.trim_end_matches('/')
+        );
+        let manifest_output = file_io
+            .new_output(&manifest_avro_uri)
+            .map_err(|e| MeruError::Iceberg(format!("manifest output: {e}")))?;
+        let manifest_writer =
+            iceberg::spec::ManifestWriter::new(manifest_output, manifest.snapshot_id, vec![]);
+        let manifest_file = manifest_writer
+            .write(iceberg_manifest)
+            .await
+            .map_err(|e| MeruError::Iceberg(format!("manifest Avro write: {e}")))?;
+
+        // ── Write manifest-list Avro ────────────────────────────────
+        let manifest_list_filename = format!(
+            "snap-{}-0-{}.avro",
+            manifest.snapshot_id, manifest.table_uuid
+        );
+        let manifest_list_uri = format!(
+            "{}/metadata/{manifest_list_filename}",
+            target_uri.trim_end_matches('/')
+        );
+        let manifest_list_output = file_io
+            .new_output(&manifest_list_uri)
+            .map_err(|e| MeruError::Iceberg(format!("manifest-list output: {e}")))?;
+        let mut manifest_list_writer = iceberg::spec::ManifestListWriter::v2(
+            manifest_list_output,
+            manifest.snapshot_id,
+            manifest.parent_snapshot_id,
+            manifest.sequence_number,
+        );
+        manifest_list_writer
+            .add_manifests(std::iter::once(manifest_file))
+            .map_err(|e| MeruError::Iceberg(format!("manifest-list add: {e}")))?;
+        manifest_list_writer
+            .close()
+            .await
+            .map_err(|e| MeruError::Iceberg(format!("manifest-list close: {e}")))?;
+
+        Ok(manifest_list_uri)
     }
 }
 
@@ -1119,6 +1263,120 @@ mod tests {
         let tm = parsed.unwrap();
         assert_eq!(tm.last_sequence_number(), 1);
         assert_eq!(tm.current_snapshot_id(), Some(1));
+
+        // Issue #54: Avro manifest files must exist alongside
+        // metadata.json. Count .avro files in the metadata dir —
+        // one manifest-list and one manifest.
+        let mut avro_count = 0usize;
+        let mut entries = tokio::fs::read_dir(target.path().join("metadata"))
+            .await
+            .unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry.file_name().to_string_lossy().ends_with(".avro") {
+                avro_count += 1;
+            }
+        }
+        assert_eq!(
+            avro_count, 2,
+            "export must produce exactly 2 Avro files (manifest-list + manifest)"
+        );
+    }
+
+    /// Issue #54 regression: the full Iceberg read path — metadata.json
+    /// → manifest-list Avro → manifest Avro → data file list — must
+    /// resolve end-to-end. This is the exact sequence DuckDB's
+    /// `iceberg_scan()`, pyiceberg, Spark, and Trino execute.
+    #[tokio::test]
+    async fn export_avro_manifest_chain_resolves_end_to_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema_arc = Arc::new(test_schema());
+        let catalog = IcebergCatalog::open(tmp.path(), test_schema())
+            .await
+            .unwrap();
+
+        // Commit two files so the manifest has multiple entries.
+        let mut txn = SnapshotTransaction::new();
+        txn.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: 1024,
+            num_rows: 100,
+            meta: test_meta(0),
+        });
+        txn.add_file(IcebergDataFile {
+            path: "data/L0/b.parquet".into(),
+            file_size: 2048,
+            num_rows: 200,
+            meta: {
+                let mut m = test_meta(0);
+                m.seq_min = 11;
+                m.seq_max = 20;
+                m.num_rows = 200;
+                m
+            },
+        });
+        catalog.commit(&txn, schema_arc.clone()).await.unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        catalog.export_to_iceberg(target.path()).await.unwrap();
+
+        // Step 1: Read metadata.json → get manifest-list path.
+        let meta_path = target.path().join("metadata/v1.metadata.json");
+        let meta_bytes = tokio::fs::read(&meta_path).await.unwrap();
+        let tm: iceberg::spec::TableMetadata = serde_json::from_slice(&meta_bytes).unwrap();
+        let snapshot = tm.current_snapshot().expect("must have a snapshot");
+        let manifest_list_path = snapshot.manifest_list();
+
+        // The manifest-list path must be a file:// URI pointing into
+        // the target directory.
+        assert!(
+            manifest_list_path.starts_with("file://"),
+            "manifest-list must be an absolute file:// URI, got: {manifest_list_path}"
+        );
+        let manifest_list_local = manifest_list_path.strip_prefix("file://").unwrap();
+        assert!(
+            std::path::Path::new(manifest_list_local).exists(),
+            "manifest-list Avro must exist at {manifest_list_local}"
+        );
+
+        // Step 2: Read manifest-list Avro → get manifest paths.
+        let file_io = iceberg::io::FileIOBuilder::new_fs_io().build().unwrap();
+        let manifest_list = snapshot.load_manifest_list(&file_io, &tm).await.unwrap();
+        let manifest_entries = manifest_list.entries();
+        assert_eq!(manifest_entries.len(), 1, "one manifest file expected");
+
+        // Step 3: Read manifest Avro → verify data file list.
+        let manifest_file = &manifest_entries[0];
+        let manifest_path = &manifest_file.manifest_path;
+        assert!(
+            manifest_path.starts_with("file://"),
+            "manifest path must be absolute file:// URI, got: {manifest_path}"
+        );
+        let manifest_local = manifest_path.strip_prefix("file://").unwrap();
+        assert!(
+            std::path::Path::new(manifest_local).exists(),
+            "manifest Avro must exist at {manifest_local}"
+        );
+
+        // Parse the manifest Avro bytes.
+        let manifest_bytes = tokio::fs::read(manifest_local).await.unwrap();
+        let manifest = iceberg::spec::Manifest::parse_avro(&manifest_bytes).unwrap();
+        let data_entries = manifest.entries();
+        assert_eq!(data_entries.len(), 2, "manifest must list both data files");
+
+        // Verify data file paths point to the catalog's base_path.
+        let canonical_base = tokio::fs::canonicalize(tmp.path()).await.unwrap();
+        let base_uri = format!("file://{}", canonical_base.display());
+        for entry in data_entries {
+            let fp = entry.file_path();
+            assert!(
+                fp.starts_with(&base_uri),
+                "data file path must be under the catalog base_path, got: {fp}"
+            );
+        }
+
+        // Verify record counts.
+        let total_rows: u64 = data_entries.iter().map(|e| e.record_count()).sum();
+        assert_eq!(total_rows, 300, "100 + 200 = 300 rows");
     }
 
     /// Issue #28 Phase 3: dual-read. A catalog directory that was

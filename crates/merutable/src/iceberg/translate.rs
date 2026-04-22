@@ -15,12 +15,6 @@
 //!
 //! # What the translator does NOT do (yet)
 //!
-//! - **No Avro emission.** The Iceberg `metadata.json` produced here
-//!   references manifest-list / manifest Avro files by path, but this
-//!   module does not emit those Avro files. Downstream tools that only
-//!   need the metadata view (catalog registration, lineage audit, schema
-//!   inspection, snapshot history) work fine with the JSON alone.
-//!   Generating real Avro manifest files is tracked as follow-on work.
 //! - **No deletion-vector projection.** merutable writes V3-style Puffin
 //!   `deletion-vector-v1` blobs for partial compactions. V3 is not yet
 //!   implemented by the `iceberg-rs` crate we depend on, so the emitted
@@ -41,6 +35,8 @@
 //! | `schema` (merutable)          | `schemas[0]` (Iceberg types) |
 //! | `entries[]`                   | referenced via manifest-list |
 //! | `properties`                  | `properties` (passed through)|
+
+use std::sync::Arc;
 
 use crate::types::{
     level::ParquetFileMeta,
@@ -417,6 +413,79 @@ pub fn to_iceberg_v2_table_metadata_bytes(
 /// moves bound fields around.
 #[allow(dead_code)]
 fn _meta_touch(_m: &ParquetFileMeta) {}
+
+// ── iceberg-rs Schema construction (Issue #54) ──────────────────────────────
+
+/// Convert a merutable [`TableSchema`] into an `iceberg::spec::Schema`.
+///
+/// Used by [`crate::iceberg::catalog::IcebergCatalog::export_to_iceberg`] to
+/// feed the iceberg-rs `ManifestWriter` / `ManifestListWriter` with a
+/// Schema object that has the correct field IDs, types, and identifier
+/// (primary-key) columns. The mapping is identical to
+/// [`to_iceberg_schema_v2`] — same field IDs (1-based), same type
+/// projection — so the metadata.json and Avro manifests agree on column
+/// identity.
+pub(crate) fn to_iceberg_rs_schema(
+    schema: &TableSchema,
+) -> crate::types::Result<iceberg::spec::Schema> {
+    let fields: Vec<Arc<iceberg::spec::NestedField>> = schema
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, col)| {
+            let field_id = (i + 1) as i32;
+            let iceberg_type = match col.col_type {
+                ColumnType::Boolean => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Boolean)
+                }
+                ColumnType::Int32 => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Int)
+                }
+                ColumnType::Int64 => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Long)
+                }
+                ColumnType::Float => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Float)
+                }
+                ColumnType::Double => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Double)
+                }
+                ColumnType::ByteArray => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Binary)
+                }
+                ColumnType::FixedLenByteArray(n) => {
+                    iceberg::spec::Type::Primitive(iceberg::spec::PrimitiveType::Fixed(n as u64))
+                }
+            };
+            if col.nullable {
+                Arc::new(iceberg::spec::NestedField::optional(
+                    field_id,
+                    &col.name,
+                    iceberg_type,
+                ))
+            } else {
+                Arc::new(iceberg::spec::NestedField::required(
+                    field_id,
+                    &col.name,
+                    iceberg_type,
+                ))
+            }
+        })
+        .collect();
+
+    let identifier_field_ids: Vec<i32> = schema
+        .primary_key
+        .iter()
+        .map(|&idx| (idx + 1) as i32)
+        .collect();
+
+    iceberg::spec::Schema::builder()
+        .with_schema_id(0)
+        .with_fields(fields)
+        .with_identifier_field_ids(identifier_field_ids)
+        .build()
+        .map_err(|e| crate::types::MeruError::Iceberg(format!("iceberg schema build: {e}")))
+}
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
