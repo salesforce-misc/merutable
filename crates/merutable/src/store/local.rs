@@ -40,20 +40,26 @@ impl MeruStore for LocalFileStore {
         // from `path` to the inode) is not durable on ext4/btrfs and
         // a crash can "roll back" the rename — leaving the caller
         // believing the write succeeded when the file is gone on reboot.
-        let tmp = full.with_extension("tmp");
+        // Temp file uses a unique suffix (PID + counter) to prevent
+        // races when two callers put() the same path concurrently.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = full.with_extension(format!("tmp.{}.{seq}", std::process::id()));
         tokio::fs::write(&tmp, &data).await?;
         // fsync the file contents before the rename so the data is
-        // durable under whatever name we link it to.
-        if let Ok(f) = tokio::fs::File::open(&tmp).await {
-            let _ = f.sync_all().await;
-        }
+        // durable under whatever name we link it to. Errors here are
+        // hard failures — proceeding with the rename after a failed
+        // fsync would leave non-durable data under the final name.
+        let f = tokio::fs::File::open(&tmp).await.map_err(MeruError::Io)?;
+        f.sync_all().await.map_err(MeruError::Io)?;
+        drop(f);
         tokio::fs::rename(&tmp, &full).await?;
         // fsync the parent directory so the rename's directory-entry
         // change is durably committed.
         if let Some(parent) = full.parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
-                let _ = dir.sync_all().await;
-            }
+            let dir = tokio::fs::File::open(parent).await.map_err(MeruError::Io)?;
+            dir.sync_all().await.map_err(MeruError::Io)?;
         }
         Ok(())
     }
@@ -159,11 +165,12 @@ impl MeruStore for LocalFileStore {
         .map_err(|e| MeruError::ObjectStore(format!("spawn_blocking join: {e}")))?;
         res?;
         // fsync the parent directory so the new directory entry is
-        // durable.
+        // durable. Errors are hard failures — without the dir fsync,
+        // a crash can "roll back" the create, letting a subsequent
+        // put_if_absent succeed again on the same path.
         if let Some(parent) = full.parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
-                let _ = dir.sync_all().await;
-            }
+            let dir = tokio::fs::File::open(parent).await.map_err(MeruError::Io)?;
+            dir.sync_all().await.map_err(MeruError::Io)?;
         }
         Ok(())
     }
@@ -236,6 +243,43 @@ mod tests {
 
         let got = store.get("ver/v1.bin").await.unwrap();
         assert_eq!(got.as_ref(), b"first", "losing writer must not overwrite");
+    }
+
+    /// Issue #47 regression: concurrent put() to the same path must
+    /// not corrupt data. With the old deterministic `.tmp` suffix,
+    /// two writers would race on the same temp file and the loser's
+    /// data could end up under the final name. With unique tmp paths
+    /// (PID + counter), each writer has its own temp file and the
+    /// last rename wins atomically — the final content is always a
+    /// complete payload from one writer, never a torn mix.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_put_no_corruption() {
+        use std::sync::Arc;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalFileStore::new(tmp.path()).unwrap());
+
+        const N: usize = 16;
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                store
+                    .put("contested/file.bin", Bytes::from(format!("writer-{i:04}")))
+                    .await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+
+        // The file must contain exactly one complete writer payload —
+        // not a torn mix, not empty, not truncated.
+        let body = store.get("contested/file.bin").await.unwrap();
+        let s = std::str::from_utf8(&body).expect("body must be valid UTF-8");
+        assert!(
+            s.starts_with("writer-") && s.len() == 11,
+            "body must be a complete 'writer-NNNN' payload, got: {s:?}"
+        );
     }
 
     /// Concurrent-contention variant: N workers race on the same
