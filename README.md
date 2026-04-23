@@ -1,5 +1,7 @@
 # merutable
 
+[![Crates.io](https://img.shields.io/crates/v/merutable.svg)](https://crates.io/crates/merutable)
+[![docs.rs](https://docs.rs/merutable/badge.svg)](https://docs.rs/merutable)
 [![CI](https://github.com/merutable/merutable/actions/workflows/ci.yml/badge.svg)](https://github.com/merutable/merutable/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-stable-blue.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
