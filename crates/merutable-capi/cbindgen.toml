@@ -1,5 +1,6 @@
 language = "C"
 include_guard = "MERUTABLE_H"
+cpp_compat = true
 documentation = true
 tab_width = 4
 style = "type"
@@ -19,6 +20,7 @@ include = [
     "MeruMemtableStats",
     "MerucacheStats",
     "MeruStats",
+    "MeruManifestInfo",
 ]
 
 [export.rename]

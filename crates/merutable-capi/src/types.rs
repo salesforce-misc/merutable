@@ -1,6 +1,6 @@
 //! C-ABI type definitions and C↔Rust conversion helpers.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 
 use bytes::Bytes;
 use merutable::types::{
@@ -99,6 +99,46 @@ pub struct MeruSchema {
     /// Array of column indices (into `columns`) that form the primary key.
     pub primary_key: *const usize,
     pub primary_key_len: usize,
+}
+
+/// Manifest snapshot returned by `meru_manifest_info`.
+/// Free with `meru_manifest_info_free`.
+#[repr(C)]
+pub struct MeruManifestInfo {
+    /// Heap-allocated table name. Free via `meru_free_string`.
+    pub table_name: *mut c_char,
+    /// Heap-allocated array of column definitions (`column_count` entries).
+    pub columns: *mut MeruColumnDef,
+    pub column_count: usize,
+    /// Heap-allocated array of primary-key column indices (`pk_count` entries).
+    pub primary_key: *mut usize,
+    pub pk_count: usize,
+    /// Heap-allocated array of heap-allocated absolute path strings (`parquet_count` entries).
+    pub parquet_paths: *mut *mut c_char,
+    pub parquet_count: usize,
+}
+
+/// Convert a Rust `ColumnDef` to a heap-ready `MeruColumnDef`.
+/// The `name` field is a heap-allocated C string (`CString::into_raw`).
+/// Free the name with `CString::from_raw` and the struct with normal drop.
+pub fn rust_col_def_to_c(col: &merutable::types::schema::ColumnDef) -> MeruColumnDef {
+    let (col_type, fixed_byte_len) = match &col.col_type {
+        ColumnType::Boolean => (MeruColumnType::Boolean, 0),
+        ColumnType::Int32 => (MeruColumnType::Int32, 0),
+        ColumnType::Int64 => (MeruColumnType::Int64, 0),
+        ColumnType::Float => (MeruColumnType::Float, 0),
+        ColumnType::Double => (MeruColumnType::Double, 0),
+        ColumnType::ByteArray => (MeruColumnType::ByteArray, 0),
+        ColumnType::FixedLenByteArray(n) => (MeruColumnType::FixedLenBytes, *n),
+    };
+    MeruColumnDef {
+        name: CString::new(col.name.as_str()).unwrap_or_default().into_raw(),
+        col_type,
+        fixed_byte_len,
+        nullable: col.nullable as u8,
+        initial_default: std::ptr::null(),
+        write_default: std::ptr::null(),
+    }
 }
 
 // ── Open options ──────────────────────────────────────────────────────────────

@@ -1,17 +1,39 @@
 //! All extern "C" database functions.
 
 use std::ffi::{c_char, c_int, CStr, CString};
+use std::sync::Arc;
 
-use merutable::{types::schema::TableSchema, MeruDB, OpenOptions};
+use merutable::{
+    iceberg::manifest::Manifest,
+    parquet::codec::{IKEY_COLUMN_NAME, OP_COLUMN_NAME, SEQ_COLUMN_NAME, VALUE_BLOB_COLUMN_NAME},
+    types::schema::TableSchema,
+    MeruDB, OpenOptions,
+};
 
 use crate::{
     error::{result_to_c, set_err, MeruStatus},
     handle::MeruHandle,
+    runtime::MeruRuntime,
     types::{
-        free_c_row_fields, rust_row_to_c, MerucacheStats, MeruMemtableStats, MeruOpenOptions,
-        MeruRow, MeruScanResult, MeruStats, MeruValue, c_pk_to_rust, c_row_to_rust, c_schema_to_rust,
+        c_pk_to_rust, c_row_to_rust, c_schema_to_rust, free_c_row_fields, rust_col_def_to_c,
+        rust_row_to_c, MerucacheStats, MeruColumnDef, MeruManifestInfo, MeruMemtableStats,
+        MeruOpenOptions, MeruRow, MeruScanResult, MeruStats, MeruValue,
     },
 };
+
+/// Borrow the runtime from a required `*mut MeruRuntime`.
+/// Returns None (and sets err) if rt_ptr is null.
+unsafe fn require_runtime(
+    rt_ptr: *mut MeruRuntime,
+    err_out: *mut *mut c_char,
+) -> Option<Arc<tokio::runtime::Runtime>> {
+    if rt_ptr.is_null() {
+        set_err(err_out, "rt must be non-null — create one with meru_runtime_new()");
+        None
+    } else {
+        Some(Arc::clone(&(*rt_ptr).inner))
+    }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -27,8 +49,13 @@ unsafe fn handle_mut<'a>(db: *mut MeruHandle) -> &'a MeruHandle {
 
 /// Open (or create) a database.
 ///
-/// On success, `*db_out` points to a newly allocated handle. The caller must
-/// call `meru_close_free()` when done.
+/// `rt` must be a non-null runtime from `meru_runtime_new()`. Multiple databases
+/// can share one runtime — they will share its thread pool.
+///
+/// Calling meru_* functions from a coroutine/async task: dispatch to a
+/// blockable thread (e.g. ASIO post to a thread_pool_executor, or
+/// std::thread) rather than calling directly from your executor's event loop
+/// thread, which may deadlock.
 ///
 /// `opts->wal_dir = NULL` defaults to `"{catalog_uri}/wal"`.
 ///
@@ -37,6 +64,7 @@ unsafe fn handle_mut<'a>(db: *mut MeruHandle) -> &'a MeruHandle {
 #[no_mangle]
 pub unsafe extern "C" fn meru_open(
     opts: *const MeruOpenOptions,
+    rt: *mut MeruRuntime,
     db_out: *mut *mut MeruHandle,
     err_out: *mut *mut c_char,
 ) -> c_int {
@@ -45,6 +73,11 @@ pub unsafe extern "C" fn meru_open(
         return MeruStatus::ErrInvalidArg as c_int;
     }
     let opts = &*opts;
+
+    let rt = match require_runtime(rt, err_out) {
+        Some(r) => r,
+        None => return MeruStatus::ErrIo as c_int,
+    };
 
     let schema = match c_schema_to_rust(&opts.schema) {
         Ok(s) => s,
@@ -82,32 +115,11 @@ pub unsafe extern "C" fn meru_open(
         .memtable_size_mb(memtable_mb)
         .read_only(opts.read_only != 0);
 
-    let (status, maybe_db) = {
-        // Build a temporary runtime just to call open() — the handle will own its own.
-        let tmp_rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                set_err(err_out, &format!("failed to create runtime: {e}"));
-                return MeruStatus::ErrIo as c_int;
-            }
-        };
-        result_to_c(tmp_rt.block_on(MeruDB::open(open_opts)), err_out)
-    };
+    let (status, maybe_db) = result_to_c(rt.block_on(MeruDB::open(open_opts)), err_out);
 
     if let Some(db) = maybe_db {
-        match MeruHandle::new(db, schema) {
-            Ok(handle) => {
-                *db_out = Box::into_raw(handle);
-                MeruStatus::Ok as c_int
-            }
-            Err(e) => {
-                set_err(err_out, &e);
-                MeruStatus::ErrIo as c_int
-            }
-        }
+        *db_out = Box::into_raw(MeruHandle::new(db, schema, rt));
+        MeruStatus::Ok as c_int
     } else {
         status
     }
@@ -116,7 +128,7 @@ pub unsafe extern "C" fn meru_open(
 /// Open an existing database, reading the schema from the manifest on disk.
 ///
 /// Use this when the schema is not known ahead of time (e.g. DuckDB extension).
-/// `wal_dir = NULL` defaults to `"{path}/wal"`.
+/// `rt` must be non-null — same rules as `meru_open`.
 ///
 /// Returns `MERU_ERR_NOT_FOUND` when no catalog exists at `path`.
 ///
@@ -126,6 +138,7 @@ pub unsafe extern "C" fn meru_open(
 pub unsafe extern "C" fn meru_open_existing(
     path: *const c_char,
     read_only: u8,
+    rt: *mut MeruRuntime,
     db_out: *mut *mut MeruHandle,
     err_out: *mut *mut c_char,
 ) -> c_int {
@@ -141,18 +154,12 @@ pub unsafe extern "C" fn meru_open_existing(
         }
     };
 
-    let tmp_rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            set_err(err_out, &format!("failed to create runtime: {e}"));
-            return MeruStatus::ErrIo as c_int;
-        }
+    let rt = match require_runtime(rt, err_out) {
+        Some(r) => r,
+        None => return MeruStatus::ErrIo as c_int,
     };
 
-    let schema: TableSchema = match tmp_rt
+    let schema: TableSchema = match rt
         .block_on(merutable::iceberg::catalog::load_persisted_schema(&path_str))
     {
         Ok(Some(s)) => s,
@@ -172,19 +179,11 @@ pub unsafe extern "C" fn meru_open_existing(
         .wal_dir(wal_dir)
         .read_only(read_only != 0);
 
-    let (status, maybe_db) = result_to_c(tmp_rt.block_on(MeruDB::open(open_opts)), err_out);
+    let (status, maybe_db) = result_to_c(rt.block_on(MeruDB::open(open_opts)), err_out);
 
     if let Some(db) = maybe_db {
-        match MeruHandle::new(db, schema) {
-            Ok(handle) => {
-                *db_out = Box::into_raw(handle);
-                MeruStatus::Ok as c_int
-            }
-            Err(e) => {
-                set_err(err_out, &e);
-                MeruStatus::ErrIo as c_int
-            }
-        }
+        *db_out = Box::into_raw(MeruHandle::new(db, schema, rt));
+        MeruStatus::Ok as c_int
     } else {
         status
     }
@@ -620,4 +619,186 @@ pub unsafe extern "C" fn meru_scan_result_free(result: *mut MeruScanResult) {
         let _owned = Vec::from_raw_parts(result.entries, result.count, result.count);
     }
     drop(Box::from_raw(result as *mut MeruScanResult));
+}
+
+// ── Manifest inspection ───────────────────────────────────────────────────────
+
+/// Read the manifest from a catalog at `path` without opening a write handle.
+///
+/// On success fills `*out` with a heap-allocated `MeruManifestInfo` containing
+/// the table schema and absolute paths of all live (non-deleted) Parquet files.
+/// Returns `MERU_STATUS_ERR_NOT_FOUND` when no catalog exists at `path`.
+/// The caller must free the result with `meru_manifest_info_free`.
+///
+/// # Safety
+/// `rt` must be non-null. `path`, `out`, and `err_out` follow the same
+/// pointer rules as `meru_open`.
+#[no_mangle]
+pub unsafe extern "C" fn meru_manifest_info(
+    rt: *mut MeruRuntime,
+    path: *const c_char,
+    out: *mut *mut MeruManifestInfo,
+    err_out: *mut *mut c_char,
+) -> c_int {
+    if path.is_null() || out.is_null() {
+        set_err(err_out, "path and out must be non-null");
+        return MeruStatus::ErrInvalidArg as c_int;
+    }
+    let rt = match require_runtime(rt, err_out) {
+        Some(r) => r,
+        None => return MeruStatus::ErrIo as c_int,
+    };
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s.to_owned(),
+        Err(_) => {
+            set_err(err_out, "path is not valid UTF-8");
+            return MeruStatus::ErrInvalidArg as c_int;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let base = std::path::Path::new(&path_str);
+        let hint_path = base.join("version-hint.text");
+        if !hint_path.exists() {
+            return Err(merutable::types::MeruError::NotFound);
+        }
+        let hint = tokio::fs::read_to_string(&hint_path)
+            .await
+            .map_err(merutable::types::MeruError::Io)?;
+        let ver: i64 = hint.trim().parse().map_err(|_| {
+            merutable::types::MeruError::Corruption("bad version-hint".into())
+        })?;
+
+        let metadata_dir = base.join("metadata");
+        let pb_path = metadata_dir.join(format!("v{ver}.metadata.pb"));
+        let data = if pb_path.exists() {
+            tokio::fs::read(&pb_path).await.map_err(merutable::types::MeruError::Io)?
+        } else {
+            let json_path = metadata_dir.join(format!("v{ver}.metadata.json"));
+            tokio::fs::read(&json_path).await.map_err(merutable::types::MeruError::Io)?
+        };
+
+        let manifest = if data.len() >= 4 && &data[0..4] == b"MRUB" {
+            Manifest::from_protobuf(&data)?
+        } else {
+            Manifest::from_json(&data)?
+        };
+
+        // Canonicalize base path once so all parquet paths are absolute.
+        let abs_base = tokio::fs::canonicalize(base)
+            .await
+            .unwrap_or_else(|_| base.to_path_buf());
+        let abs_base_str = abs_base.to_string_lossy().into_owned();
+
+        Ok((manifest, abs_base_str))
+    });
+
+    let (manifest, abs_base) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            set_err(err_out, &e.to_string());
+            return crate::error::error_to_status(&e) as c_int;
+        }
+    };
+
+    // Build the C struct.
+    let table_name = CString::new(manifest.schema.table_name.as_str())
+        .unwrap_or_default()
+        .into_raw();
+
+    let mut cols: Vec<MeruColumnDef> = manifest
+        .schema
+        .columns
+        .iter()
+        .filter(|c| {
+            !matches!(
+                c.name.as_str(),
+                IKEY_COLUMN_NAME | SEQ_COLUMN_NAME | OP_COLUMN_NAME | VALUE_BLOB_COLUMN_NAME
+            )
+        })
+        .map(rust_col_def_to_c)
+        .collect();
+    let column_count = cols.len();
+    let columns = cols.as_mut_ptr();
+    std::mem::forget(cols);
+
+    let mut pk: Vec<usize> = manifest.schema.primary_key.clone();
+    let pk_count = pk.len();
+    let primary_key = pk.as_mut_ptr();
+    std::mem::forget(pk);
+
+    let live_paths: Vec<*mut c_char> = manifest
+        .entries
+        .iter()
+        .filter(|e| e.status != "deleted")
+        .map(|e| {
+            let abs = format!("{abs_base}/{}", e.path);
+            CString::new(abs).unwrap_or_default().into_raw()
+        })
+        .collect();
+    let parquet_count = live_paths.len();
+    let mut paths_vec = live_paths;
+    let parquet_paths = paths_vec.as_mut_ptr();
+    std::mem::forget(paths_vec);
+
+    let info = Box::new(MeruManifestInfo {
+        table_name,
+        columns,
+        column_count,
+        primary_key,
+        pk_count,
+        parquet_paths,
+        parquet_count,
+    });
+    *out = Box::into_raw(info);
+    MeruStatus::Ok as c_int
+}
+
+/// Free a `MeruManifestInfo` returned by `meru_manifest_info`. Safe to call with NULL.
+///
+/// # Safety
+/// `info` must have been returned by `meru_manifest_info`.
+#[no_mangle]
+pub unsafe extern "C" fn meru_manifest_info_free(info: *mut MeruManifestInfo) {
+    if info.is_null() {
+        return;
+    }
+    let info = &mut *info;
+
+    drop(CString::from_raw(info.table_name));
+
+    if !info.columns.is_null() && info.column_count > 0 {
+        let cols = std::slice::from_raw_parts_mut(info.columns, info.column_count);
+        for col in cols.iter_mut() {
+            if !col.name.is_null() {
+                drop(CString::from_raw(col.name as *mut c_char));
+            }
+        }
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+            info.columns,
+            info.column_count,
+        )));
+    }
+
+    if !info.primary_key.is_null() && info.pk_count > 0 {
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+            info.primary_key,
+            info.pk_count,
+        )));
+    }
+
+    if !info.parquet_paths.is_null() && info.parquet_count > 0 {
+        let paths = std::slice::from_raw_parts_mut(info.parquet_paths, info.parquet_count);
+        for p in paths.iter_mut() {
+            if !p.is_null() {
+                drop(CString::from_raw(*p));
+            }
+        }
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+            info.parquet_paths,
+            info.parquet_count,
+        )));
+    }
+
+    drop(Box::from_raw(info as *mut MeruManifestInfo));
 }

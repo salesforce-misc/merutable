@@ -1,8 +1,9 @@
 /*
  * Smoke test for the merutable C API.
  *
- * Exercises the full lifecycle: open → put → get → scan → stats →
- * catalog_path → close → reopen (read-only) → close.
+ * Exercises the full lifecycle:
+ *   runtime_new → open (shared rt) → put → get → scan → stats →
+ *   catalog_path → close → reopen (read-only, shared rt) → close → runtime_free
  *
  * The database directory is read from the MERU_SMOKE_DB environment variable,
  * defaulting to /tmp/meru_smoke_test when unset.
@@ -67,9 +68,20 @@ int main(void) {
         .read_only        = 0,
     };
 
+    /* ── Runtime ─────────────────────────────────────────────────────── */
+    /*
+     * meru_runtime_new() is required before any meru_open call.
+     * 0 = default thread count (one per logical CPU).
+     * Share one runtime across all databases in the process to share
+     * the thread pool. meru_runtime_free() after all handles are closed.
+     */
+    MeruRuntime *rt = meru_runtime_new(0, &err);
+    if (!rt) die("meru_runtime_new", -1, err);
+    printf("created shared runtime\n");
+
     /* ── Open ────────────────────────────────────────────────────────── */
     MeruHandle *db = NULL;
-    status = meru_open(&opts, &db, &err);
+    status = meru_open(&opts, rt, &db, &err);
     if (status != MeruStatus_Ok) die("meru_open", status, err);
     printf("opened db at %s\n", db_path);
 
@@ -194,12 +206,20 @@ int main(void) {
      * meru_open_existing reads the TableSchema from the manifest on disk
      * so the caller does not need to re-supply it. Useful for tooling and
      * the DuckDB extension where the schema is not known ahead of time.
+     * Passing the same `rt` reuses the shared thread pool.
      */
     MeruHandle *db2 = NULL;
-    status = meru_open_existing(db_path, /*read_only=*/1, &db2, &err);
+    status = meru_open_existing(db_path, /*read_only=*/1, rt, &db2, &err);
     if (status != MeruStatus_Ok) die("meru_open_existing", status, err);
     printf("reopened (read-only) with meru_open_existing\n");
     meru_close_free(db2, NULL);
+
+    /* ── Tear down shared runtime ────────────────────────────────────── */
+    /*
+     * Free the runtime after all handles that share it are closed.
+     * The thread pool shuts down when the last Arc<Runtime> is dropped.
+     */
+    meru_runtime_free(rt);
 
     printf("smoke test PASSED\n");
     return 0;

@@ -38,9 +38,19 @@ typedef enum {
 } MeruStatus;
 
 /**
- * Opaque handle. C callers hold `*mut MeruHandle` (typedef'd as `MeruDB *` in the header).
+ * Opaque handle. C callers hold `*mut MeruHandle`.
+ *
+ * The runtime is Arc-shared so multiple handles can be opened on a single
+ * MeruRuntime (one thread pool serving all of them).
  */
 typedef struct MeruHandle MeruHandle;
+
+/**
+ * Opaque shareable tokio runtime. Pass to meru_open() so multiple databases
+ * share one thread pool. NULL is accepted everywhere and creates a
+ * per-handle runtime instead.
+ */
+typedef struct MeruRuntime MeruRuntime;
 
 /**
  * Pointer + length into a byte buffer. Used inside MeruValue.
@@ -181,23 +191,62 @@ typedef struct {
 } MeruStats;
 
 /**
+ * Manifest snapshot returned by `meru_manifest_info`.
+ * Free with `meru_manifest_info_free`.
+ */
+typedef struct {
+    /**
+     * Heap-allocated table name. Free via `meru_free_string`.
+     */
+    char *table_name;
+    /**
+     * Heap-allocated array of column definitions (`column_count` entries).
+     */
+    MeruColumnDef *columns;
+    uintptr_t column_count;
+    /**
+     * Heap-allocated array of primary-key column indices (`pk_count` entries).
+     */
+    uintptr_t *primary_key;
+    uintptr_t pk_count;
+    /**
+     * Heap-allocated array of heap-allocated absolute path strings (`parquet_count` entries).
+     */
+    char **parquet_paths;
+    uintptr_t parquet_count;
+} MeruManifestInfo;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+/**
  * Open (or create) a database.
  *
- * On success, `*db_out` points to a newly allocated handle. The caller must
- * call `meru_close_free()` when done.
+ * `rt` must be a non-null runtime from `meru_runtime_new()`. Multiple databases
+ * can share one runtime — they will share its thread pool.
+ *
+ * Calling meru_* functions from a coroutine/async task: dispatch to a
+ * blockable thread (e.g. ASIO post to a thread_pool_executor, or
+ * std::thread) rather than calling directly from your executor's event loop
+ * thread, which may deadlock.
  *
  * `opts->wal_dir = NULL` defaults to `"{catalog_uri}/wal"`.
  *
  * # Safety
  * All pointer fields in `opts` must be valid non-null C strings (except `wal_dir`).
  */
-extern int meru_open(const MeruOpenOptions *opts, MeruHandle **db_out, char **err_out);
+extern
+int meru_open(const MeruOpenOptions *opts,
+              MeruRuntime *rt,
+              MeruHandle **db_out,
+              char **err_out);
 
 /**
  * Open an existing database, reading the schema from the manifest on disk.
  *
  * Use this when the schema is not known ahead of time (e.g. DuckDB extension).
- * `wal_dir = NULL` defaults to `"{path}/wal"`.
+ * `rt` must be non-null — same rules as `meru_open`.
  *
  * Returns `MERU_ERR_NOT_FOUND` when no catalog exists at `path`.
  *
@@ -207,6 +256,7 @@ extern int meru_open(const MeruOpenOptions *opts, MeruHandle **db_out, char **er
 extern
 int meru_open_existing(const char *path,
                        uint8_t read_only,
+                       MeruRuntime *rt,
                        MeruHandle **db_out,
                        char **err_out);
 
@@ -391,11 +441,64 @@ extern void meru_row_free(MeruRow *row);
 extern void meru_scan_result_free(MeruScanResult *result);
 
 /**
+ * Read the manifest from a catalog at `path` without opening a write handle.
+ *
+ * On success fills `*out` with a heap-allocated `MeruManifestInfo` containing
+ * the table schema and absolute paths of all live (non-deleted) Parquet files.
+ * Returns `MERU_STATUS_ERR_NOT_FOUND` when no catalog exists at `path`.
+ * The caller must free the result with `meru_manifest_info_free`.
+ *
+ * # Safety
+ * `rt` must be non-null. `path`, `out`, and `err_out` follow the same
+ * pointer rules as `meru_open`.
+ */
+extern
+int meru_manifest_info(MeruRuntime *rt,
+                       const char *path,
+                       MeruManifestInfo **out,
+                       char **err_out);
+
+/**
+ * Free a `MeruManifestInfo` returned by `meru_manifest_info`. Safe to call with NULL.
+ *
+ * # Safety
+ * `info` must have been returned by `meru_manifest_info`.
+ */
+extern void meru_manifest_info_free(MeruManifestInfo *info);
+
+/**
  * Free a C string returned by the API (catalog_path, error messages).
  *
  * # Safety
  * `s` must have been allocated by the merutable C API. Passing NULL is safe.
  */
 extern void meru_free_string(char *s);
+
+/**
+ * Create a new multi-thread tokio runtime.
+ *
+ * `worker_threads = 0` uses the tokio default (one thread per logical CPU).
+ *
+ * Returns NULL on failure; `*err_out` is set when err_out is non-null.
+ *
+ * # Safety
+ * `err_out` must be null or a valid pointer to a `char *`.
+ */
+extern MeruRuntime *meru_runtime_new(uintptr_t worker_threads, char **err_out);
+
+/**
+ * Free a MeruRuntime. Safe to call with NULL.
+ *
+ * The underlying thread pool is shut down when the last handle that shares
+ * this runtime is also freed.
+ *
+ * # Safety
+ * `rt` must have been returned by `meru_runtime_new`.
+ */
+extern void meru_runtime_free(MeruRuntime *rt);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
 
 #endif  /* MERUTABLE_H */

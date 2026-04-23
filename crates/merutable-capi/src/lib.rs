@@ -8,18 +8,22 @@
 mod db_fns;
 mod error;
 mod handle;
+mod runtime;
 mod types;
 
 // Re-export all public symbols so they appear in the dylib and are picked up
 // by cbindgen when it traverses this crate root.
 pub use db_fns::{
     meru_catalog_path, meru_close, meru_close_free, meru_compact, meru_delete, meru_export_iceberg,
-    meru_flush, meru_free, meru_get, meru_is_closed, meru_open, meru_open_existing, meru_put,
-    meru_put_batch, meru_refresh, meru_row_free, meru_scan, meru_scan_result_free, meru_stats,
+    meru_flush, meru_free, meru_get, meru_is_closed, meru_manifest_info, meru_manifest_info_free,
+    meru_open, meru_open_existing, meru_put, meru_put_batch, meru_refresh, meru_row_free,
+    meru_scan, meru_scan_result_free, meru_stats,
 };
+pub use runtime::{meru_runtime_free, meru_runtime_new, MeruRuntime};
 pub use error::meru_free_string;
 pub use types::{
-    MerucacheStats, MeruBytesView, MeruColumnDef, MeruColumnType, MeruMemtableStats,
-    MeruOpenOptions, MeruRow, MeruScanResult, MeruSchema, MeruStats, MeruValue, MeruValueInner,
+    MerucacheStats, MeruBytesView, MeruColumnDef, MeruColumnType, MeruManifestInfo,
+    MeruMemtableStats, MeruOpenOptions, MeruRow, MeruScanResult, MeruSchema, MeruStats, MeruValue,
+    MeruValueInner,
 };
 pub use error::MeruStatus;
