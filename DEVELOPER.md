@@ -8,24 +8,53 @@
   ```
 - **Git**
 
+## Python bindings (`merutable-python`)
+
+The `merutable-python` crate produces a native Python module via PyO3.
+Building it requires a Python environment with [maturin](https://www.maturin.rs/):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install maturin
+
+cd crates/merutable-python
+maturin develop --release
+```
+
+The `lab/setup.sh` script automates this along with the Jupyter
+dependencies needed by the notebook.
+
 ## Building
 
 ```bash
-# Debug build (fast compile, slow runtime)
-cargo build --workspace
+# Default build (uses default-members)
+cargo build
 
 # Release build (LTO enabled, optimized)
-cargo build --workspace --release
+cargo build --release
+
+# All crates (--workspace includes merutable-python, requires Python setup above)
+cargo build --workspace
+
+# Single crate
+cargo build -p merutable
 ```
 
 ## Running tests
 
 ```bash
-# All tests, debug mode
+# Default (uses default-members)
+cargo test
+
+# Release mode (catches release-only UB)
+cargo test --release
+
+# All crates (--workspace includes merutable-python, requires Python setup above)
 cargo test --workspace
 
-# All tests, release mode (catches release-only UB)
-cargo test --workspace --release
+# Single crate
+cargo test -p merutable
 ```
 
 ## Linting
