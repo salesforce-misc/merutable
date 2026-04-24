@@ -2,10 +2,12 @@
 
 ## Prerequisites
 
-- **Rust stable** (1.80+): install via [rustup](https://rustup.rs/)
+- **Rust**: install via [rustup](https://rustup.rs/)
   ```
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
+  The exact toolchain version is pinned in `rust-toolchain.toml` at the workspace root.
+  `rustup` reads this file automatically — no manual version selection needed.
 - **Git**
 
 ## Building
