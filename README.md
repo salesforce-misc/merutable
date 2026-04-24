@@ -110,7 +110,7 @@ Deeper reads:
 [`docs/TAXONOMY.md`](docs/TAXONOMY.md) ·
 [`DEVELOPER.md`](DEVELOPER.md)
 
-## Lab notebook
+## Benchmarks
 
 [`lab/lab_merutable.ipynb`](lab/lab_merutable.ipynb) — a live, runnable
 showcase comparing merutable against DuckDB head-to-head, then demonstrating
