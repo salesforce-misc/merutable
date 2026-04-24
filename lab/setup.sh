@@ -10,6 +10,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
+# Require Python 3.11+ (3.9 is EOL, 3.10 EOL upcoming).
+PYVER=$(python3 -c 'import sys; print(sys.version_info[:2])')
+if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)'; then
+    echo "==> Python version: $PYVER"
+else
+    echo "ERROR: Python 3.11+ is required (found $PYVER)" >&2
+    exit 1
+fi
+
 echo "==> Creating Python virtual environment..."
 python3 -m venv .venv
 source .venv/bin/activate

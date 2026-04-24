@@ -11,7 +11,7 @@
 ## Python bindings (`merutable-python`)
 
 The `merutable-python` crate produces a native Python module via PyO3.
-Building it requires a Python environment with [maturin](https://www.maturin.rs/):
+Building it requires Python 3.11+ and [maturin](https://www.maturin.rs/):
 
 ```bash
 python3 -m venv .venv
