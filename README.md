@@ -1,19 +1,18 @@
-<p align="center">
-  <img src="docs/assets/wordmark.svg" alt="merutable" width="480"/>
+<p>
+  <img src="docs/assets/wordmark.svg" alt="merutable" height="36"/>
 </p>
 
-<p align="center">
+<p>
   <a href="https://github.com/merutable/merutable/actions/workflows/ci.yml"><img src="https://github.com/merutable/merutable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/merutable"><img src="https://img.shields.io/crates/v/merutable.svg" alt="crates.io"></a>
   <a href="https://docs.rs/merutable"><img src="https://docs.rs/merutable/badge.svg" alt="docs.rs"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License"></a>
 </p>
 
-<p align="center"><b>An embeddable Rust table engine. LSM writes, Parquet storage, Iceberg-compatible metadata.</b></p>
+<p><b>An embeddable Rust table engine. LSM writes, Parquet storage, Iceberg-compatible metadata.</b></p>
 
-`merutable` is a single-table engine you link into your process, not a server
-you deploy. Writes go through a WAL + skip-list memtable; flushes land as
-Apache Parquet SSTables. Call `db.export_iceberg(path)` when you want an
+The writes go through a WAL + skip-list memtable; flushes land as
+Apache Parquet based SSTables. Invoke `db.export_iceberg(path)` when you need an
 Iceberg v2 view — DuckDB, Spark, Trino, Snowflake, and pyiceberg read it with
 no format conversion.
 
@@ -51,10 +50,9 @@ async fn main() -> merutable::error::Result<()> {
 
 ## When merutable fits
 
-Structured data at a single-process scope that needs to be both write-fast —
-agent memory, session state, audit logs, feature stores, embedded
-time-series — and readable by analytical engines without an ETL job. An LSM
-gives you the writes; Iceberg export gives you the reads.
+Structured data thats both **write-heavy** - agent memory, session state, audit logs, feature stores, embedded
+time-series - and **readable by analytical engines** without an ETL job. An LSM
+gives you the fast-writes; Iceberg compatible metadata layer gives you the analytics reads.
 
 ## What's in the box
 
@@ -68,9 +66,8 @@ gives you the writes; Iceberg export gives you the reads.
 - **Iceberg export on demand.** `db.export_iceberg(path)` writes a
   spec-clean Iceberg v2 chain — `metadata.json` + manifest-list Avro +
   manifest Avro — that DuckDB `iceberg_scan`, pyiceberg, Spark, Trino, and
-  Athena consume as-is. CI round-trips the chain through `iceberg-rs`. You
-  call `export_iceberg` when you want the view; on-disk layout is not bound
-  to the Iceberg spec.
+  Athena consume as-is. You call `export_iceberg` when you want the view.
+  `merutable`'s metadata layer efficiency is not bound by the Iceberg spec.
 - **Change feed.** Committed operations are exposed as a change feed table
   provider with `seq > N` predicate pushdown and per-DELETE pre-image
   reconstruction.
@@ -128,12 +125,9 @@ cd lab && bash setup.sh
 
 | Area              | 0.0.1                                                               |
 |-------------------|---------------------------------------------------------------------|
-| Storage format    | Iceberg v2-compatible, CI-pinned via round-trip deserialization.    |
-| Rust public API   | Unstable. Expect breaking changes across 0.x.                        |
-| Python API        | Unstable. Matches the Rust surface.                                  |
+| Storage format    | LSM tree layout optimized for both row and columnar. Iceberg v2-compatible.  |
 | Durability        | fsync on SST write, fsync on WAL, fsync on manifest commit.          |
 | Concurrency       | Designed for one primary writer per catalog (not yet lock-enforced); many concurrent readers via version pinning. |
-| Deployment target | Single process, local disk. Object-store primary is not yet shipped. |
 
 ## License
 
