@@ -129,9 +129,6 @@ cd lab && bash setup.sh
 | Durability        | fsync on SST write, fsync on WAL, fsync on manifest commit.          |
 | Concurrency       | Designed for one primary writer per catalog (not yet lock-enforced); many concurrent readers via version pinning. |
 
-## License
-
-Apache-2.0. See [`LICENSE`](LICENSE).
 
 Named after [Mount Meru](https://en.wikipedia.org/wiki/Mount_Meru) — the axis
 around which the cosmos is ordered in Indian cosmology.
