@@ -73,7 +73,13 @@ jobs:
         run: cargo install cargo-criterion
 
       - name: Run benchmarks
-        run: cargo criterion --workspace --output-format bencher 2>/dev/null | tee output.txt
+        # cargo-criterion writes bencher-format lines to stderr, not stdout.
+        # Stdout carries only the lib crate's spurious "0 measured" output
+        # from libtest's bench shim (we have no #[bench] fns; the criterion
+        # harness uses [[bench]] targets with harness=false). Capture stderr
+        # to output.txt and discard stdout. github-action-benchmark's cargo
+        # parser ignores non-bencher lines (Compiling/Finished/Gnuplot…).
+        run: cargo criterion --workspace --output-format bencher >/dev/null 2>output.txt
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
