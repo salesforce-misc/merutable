@@ -87,6 +87,14 @@ jobs:
           tool: cargo
           output-file-path: output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # The bench job runs only on pull_request, never on push to
+          # main, so a gh-pages history would never get populated. Skip
+          # the fetch (which fails when gh-pages doesn't exist) and the
+          # save. The action just parses output.txt and surfaces results;
+          # regression detection is a separate feature that needs a
+          # main-branch trigger to be useful.
+          skip-fetch-gh-pages: true
+          save-data-file: false
           auto-push: false
           comment-on-alert: true
           alert-threshold: "200%"
