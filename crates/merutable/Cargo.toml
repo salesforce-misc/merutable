@@ -4,6 +4,7 @@ version       = "0.0.1"
 edition       = "2021"
 description   = "Embeddable single-table engine: row + columnar Parquet with Iceberg-compatible metadata"
 keywords      = ["embedded", "lsm", "iceberg", "parquet", "table"]
+rust-version  = "1.88.0"
 license       = "Apache-2.0"
 repository    = "https://github.com/merutable/merutable"
 homepage      = "https://github.com/merutable/merutable"
