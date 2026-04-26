@@ -11,9 +11,9 @@
 //! NOT-NULL-no-default column.
 
 use merutable::types::{
+    MeruError,
     schema::{ColumnDef, ColumnType, TableSchema},
     value::{FieldValue, Row},
-    MeruError,
 };
 use merutable::{MeruDB, OpenOptions};
 

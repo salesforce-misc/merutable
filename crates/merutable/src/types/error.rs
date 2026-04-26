@@ -58,7 +58,9 @@ pub enum MeruError {
     /// this matches Debezium + pg_logical's escalation pattern.
     /// Critically, the change feed does NOT hold back retention;
     /// stale consumers don't pin the LSM.
-    #[error("change feed below retention: requested {requested}, low_water {low_water} — escalate to Iceberg snapshot scan")]
+    #[error(
+        "change feed below retention: requested {requested}, low_water {low_water} — escalate to Iceberg snapshot scan"
+    )]
     ChangeFeedBelowRetention { requested: u64, low_water: u64 },
 }
 

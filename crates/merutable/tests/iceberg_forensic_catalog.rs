@@ -11,10 +11,10 @@ use std::{collections::HashMap, fs, sync::Arc};
 
 use bytes::Bytes;
 use merutable::iceberg::{
+    IcebergCatalog,
     deletion_vector::DeletionVector,
     manifest::{DvLocation, Manifest},
     snapshot::{IcebergDataFile, SnapshotTransaction},
-    IcebergCatalog,
 };
 use merutable::types::{
     level::{Level, ParquetFileMeta},

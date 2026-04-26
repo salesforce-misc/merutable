@@ -1,17 +1,17 @@
 //! `MeruEngine`: central orchestrator. Owns WAL, memtable, version set, catalog,
 //! and background workers. All public operations go through this struct.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::iceberg::{IcebergCatalog, VersionSet};
 use crate::memtable::manager::MemtableManager;
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     schema::TableSchema,
     sequence::{GlobalSeq, OpType, SeqNum},
     value::{FieldValue, Row},
-    MeruError, Result,
 };
 use crate::wal::{batch::WriteBatch, manager::WalManager};
 use tokio::sync::Mutex;
@@ -649,8 +649,8 @@ impl MeruEngine {
                 wal.rotate()?;
             }
         } // rotation_lock dropped
-          // Flush all immutables. `run_flush` calls `mark_flushed_seq` which
-          // GCs the matching closed WAL file as a side effect.
+        // Flush all immutables. `run_flush` calls `mark_flushed_seq` which
+        // GCs the matching closed WAL file as a side effect.
         while self.memtable.oldest_immutable().is_some() {
             crate::engine::flush::run_flush(self).await?;
         }

@@ -264,7 +264,7 @@ async fn issue_33_delete_pre_image_survives_flush() {
 /// that touches either mechanism doesn't silently lose it.
 #[tokio::test]
 async fn issue_33_same_batch_put_then_delete_surfaces_put_as_pre_image() {
-    use merutable::engine::write_path::{apply_batch, MutationBatch};
+    use merutable::engine::write_path::{MutationBatch, apply_batch};
     let tmp = tempfile::tempdir().unwrap();
     let engine = open_engine(&tmp).await;
 

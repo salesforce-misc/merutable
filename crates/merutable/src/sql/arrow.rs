@@ -36,9 +36,9 @@
 use std::sync::Arc;
 
 use crate::types::{
+    MeruError, Result,
     schema::{ColumnType, TableSchema},
     value::FieldValue,
-    MeruError, Result,
 };
 use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,

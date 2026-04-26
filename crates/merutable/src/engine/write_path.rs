@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use crate::types::{
+    Result,
     key::InternalKey,
     sequence::{OpType, SeqNum},
     value::{FieldValue, Row},
-    Result,
 };
 use crate::wal::batch::WriteBatch;
 use bytes::Bytes;

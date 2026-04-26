@@ -10,7 +10,7 @@
 //! unambiguous regardless of column count, we prepend a single `0x01` marker
 //! byte to postcard output.
 
-use crate::types::{value::Row, MeruError, Result};
+use crate::types::{MeruError, Result, value::Row};
 
 /// Marker byte prepended to postcard-encoded rows.
 /// JSON never starts with 0x01, so this is a reliable discriminator.

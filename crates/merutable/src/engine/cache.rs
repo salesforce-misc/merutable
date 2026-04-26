@@ -25,8 +25,8 @@
 //! held only for the duration of a hash-map get/put — no I/O under the lock.
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::{sequence::OpType, value::Row};
 use lru::LruCache;

@@ -17,8 +17,8 @@
 //! Varint encoding: little-endian base-128 (standard LEB128).
 
 use crate::types::{
-    sequence::{OpType, SeqNum},
     MeruError, Result,
+    sequence::{OpType, SeqNum},
 };
 use bytes::{BufMut, Bytes, BytesMut};
 

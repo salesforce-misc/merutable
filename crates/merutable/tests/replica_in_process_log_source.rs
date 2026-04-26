@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use merutable::MeruDB;
 use merutable::replica::{InProcessLogSource, LogSource};
 use merutable::sql::ChangeOp;
 use merutable::types::{
     schema::{ColumnDef, ColumnType, TableSchema},
     value::{FieldValue, Row},
 };
-use merutable::MeruDB;
 
 fn schema() -> TableSchema {
     TableSchema {

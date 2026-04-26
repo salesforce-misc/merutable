@@ -41,8 +41,8 @@
 //! arriving between `notified().await` registrations is not lost.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use crate::engine::engine::MeruEngine;
@@ -514,8 +514,8 @@ mod tests {
     #[tokio::test]
     async fn mirror_snapshot_uploads_files_manifest_and_low_water() {
         use crate::iceberg::{
-            snapshot::{IcebergDataFile, SnapshotTransaction},
             IcebergCatalog,
+            snapshot::{IcebergDataFile, SnapshotTransaction},
         };
         use crate::types::level::{Level, ParquetFileMeta};
         let tmp = tempfile::tempdir().unwrap();

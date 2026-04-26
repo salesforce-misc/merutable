@@ -49,11 +49,11 @@ use std::sync::Arc;
 
 use crate::engine::{background::BackgroundWorkers, config::EngineConfig, engine::MeruEngine};
 use crate::types::{
+    Result,
     key::InternalKey,
     schema::TableSchema,
     sequence::SeqNum,
     value::{FieldValue, Row},
-    Result,
 };
 
 use crate::options::OpenOptions;

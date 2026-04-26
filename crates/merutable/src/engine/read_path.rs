@@ -22,16 +22,16 @@
 
 use std::{path::Path, sync::Arc};
 
-use crate::iceberg::{version::DataFileMeta, DeletionVector};
+use crate::iceberg::{DeletionVector, version::DataFileMeta};
 use crate::memtable::iterator::MemEntry;
 use crate::parquet::reader::ParquetReader;
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     level::Level,
     schema::TableSchema,
     sequence::{OpType, SeqNum},
     value::{FieldValue, Row},
-    MeruError, Result,
 };
 use bytes::Bytes;
 use roaring::RoaringBitmap;

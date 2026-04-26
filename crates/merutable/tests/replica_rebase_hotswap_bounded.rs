@@ -18,8 +18,8 @@
 //!      Hangs from any future `LogSource` impl (Raft, Kafka,
 //!      ObjectStore) produce a clean error instead of a deadlock.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use merutable::replica::{InProcessLogSource, Replica};

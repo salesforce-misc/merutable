@@ -9,9 +9,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::types::{
+    MeruError, Result,
     level::{Level, ParquetFileMeta},
     schema::TableSchema,
-    MeruError, Result,
 };
 
 use crate::iceberg::version::{DataFileMeta, Version};

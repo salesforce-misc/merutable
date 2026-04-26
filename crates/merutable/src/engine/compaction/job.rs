@@ -14,14 +14,14 @@
 
 use std::{path::Path, sync::Arc};
 
-use crate::iceberg::{version::DataFileMeta, DeletionVector, IcebergDataFile, SnapshotTransaction};
+use crate::iceberg::{DeletionVector, IcebergDataFile, SnapshotTransaction, version::DataFileMeta};
 use crate::parquet::reader::ParquetReader;
 use crate::types::{
+    MeruError, Result,
     level::Level,
     level::ParquetFileMeta,
     schema::TableSchema,
     value::{FieldValue, Row},
-    MeruError, Result,
 };
 use bytes::Bytes;
 use roaring::RoaringBitmap;

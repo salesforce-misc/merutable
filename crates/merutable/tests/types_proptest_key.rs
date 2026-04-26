@@ -34,7 +34,7 @@ use bytes::Bytes;
 use merutable::types::{
     key::InternalKey,
     schema::{ColumnDef, ColumnType, TableSchema},
-    sequence::{OpType, SeqNum, SEQNUM_MAX},
+    sequence::{OpType, SEQNUM_MAX, SeqNum},
     value::FieldValue,
 };
 use proptest::prelude::*;

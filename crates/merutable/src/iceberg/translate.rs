@@ -42,7 +42,7 @@ use crate::types::{
     level::ParquetFileMeta,
     schema::{ColumnType, TableSchema},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::iceberg::manifest::{Manifest, ManifestEntry};
 

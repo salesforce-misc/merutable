@@ -34,11 +34,11 @@ use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::{
     BinaryExpr, Expr, Operator, TableProviderFilterPushDown, TableType,
 };
-use datafusion::physical_plan::memory::MemoryExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::memory::MemoryExec;
 
-use crate::sql::arrow::{change_feed_schema, records_to_record_batch};
 use crate::sql::ChangeFeedCursor;
+use crate::sql::arrow::{change_feed_schema, records_to_record_batch};
 
 /// A DataFusion-shaped view of the change feed. Register with a
 /// `SessionContext::register_table("merutable_changes", ..)` and

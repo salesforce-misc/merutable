@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
+use merutable::MeruDB;
 use merutable::replica::{InProcessLogSource, ReplicaTail};
 use merutable::types::{
     schema::{ColumnDef, ColumnType, TableSchema},
     value::{FieldValue, Row},
 };
-use merutable::MeruDB;
 
 fn schema() -> TableSchema {
     TableSchema {

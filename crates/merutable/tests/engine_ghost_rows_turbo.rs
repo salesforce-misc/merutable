@@ -165,7 +165,8 @@ async fn turbo_mode_deletes_do_not_resurrect() {
         let got = engine.get(&pk_vals).unwrap();
         let actual_present = got.is_some();
         assert_eq!(
-            actual_present, *expected_present,
+            actual_present,
+            *expected_present,
             "Issue #23 final check: pk=({id}, {:?}) expected={expected_present} got={actual_present}",
             String::from_utf8_lossy(key2)
         );

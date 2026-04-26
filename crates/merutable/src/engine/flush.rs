@@ -17,11 +17,11 @@ use std::sync::Arc;
 use crate::iceberg::{IcebergDataFile, SnapshotTransaction};
 use crate::memtable::iterator::MemEntry;
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     level::{Level, ParquetFileMeta},
     sequence::SeqNum,
     value::Row,
-    MeruError, Result,
 };
 use tracing::{debug, info, instrument};
 

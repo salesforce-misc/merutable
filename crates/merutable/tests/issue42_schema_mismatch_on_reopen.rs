@@ -17,8 +17,8 @@
 
 use merutable::iceberg::IcebergCatalog;
 use merutable::types::{
-    schema::{ColumnDef, ColumnType, TableSchema},
     MeruError,
+    schema::{ColumnDef, ColumnType, TableSchema},
 };
 
 fn base_schema() -> TableSchema {

@@ -8,7 +8,7 @@
 //! schema from the footer without any merutable imports — the JSON shape
 //! is stable and human-readable.
 
-use crate::types::{level::ParquetFileMeta, schema::TableSchema, MeruError, Result};
+use crate::types::{MeruError, Result, level::ParquetFileMeta, schema::TableSchema};
 use std::collections::HashMap;
 
 /// Encode merutable metadata as Parquet KV footer entries.

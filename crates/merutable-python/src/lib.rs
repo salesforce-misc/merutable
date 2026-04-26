@@ -10,8 +10,8 @@ mod convert;
 
 use std::sync::Arc;
 
-use ::merutable::types::schema::{ColumnDef, TableSchema};
 use ::merutable::MeruDB as RustMeruDB;
+use ::merutable::types::schema::{ColumnDef, TableSchema};
 use pyo3::{prelude::*, types::PyDict};
 
 /// Python-visible MeruDB wrapper.

@@ -11,11 +11,11 @@
 use std::sync::Arc;
 
 use crate::types::{
-    key::InternalKey, level::ParquetFileMeta, schema::TableSchema, sequence::SeqNum, value::Row,
-    MeruError, Result,
+    MeruError, Result, key::InternalKey, level::ParquetFileMeta, schema::TableSchema,
+    sequence::SeqNum, value::Row,
 };
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use parquet::file::reader::{ChunkReader, FileReader, SerializedFileReader};
 use roaring::RoaringBitmap;
 
@@ -23,7 +23,7 @@ use crate::parquet::{
     bloom::FastLocalBloom,
     codec::{self, IKEY_COLUMN_NAME, VALUE_BLOB_COLUMN_NAME},
     footer::decode_footer_kv,
-    kv_index::{KvSparseIndex, PageLocation, KV_INDEX_FOOTER_KEY},
+    kv_index::{KV_INDEX_FOOTER_KEY, KvSparseIndex, PageLocation},
 };
 
 pub struct ParquetReader<R: ChunkReader + Clone> {

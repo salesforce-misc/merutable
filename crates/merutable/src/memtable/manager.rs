@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use crate::types::{sequence::SeqNum, Result};
+use crate::types::{Result, sequence::SeqNum};
 use crate::wal::batch::WriteBatch;
 use tracing::debug;
 

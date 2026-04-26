@@ -35,7 +35,7 @@ use bytes::Bytes;
 use merutable::parquet::{
     bloom::FastLocalBloom,
     codec::{IKEY_COLUMN_NAME, OP_COLUMN_NAME, SEQ_COLUMN_NAME, VALUE_BLOB_COLUMN_NAME},
-    kv_index::{KvSparseIndex, KV_INDEX_FOOTER_KEY},
+    kv_index::{KV_INDEX_FOOTER_KEY, KvSparseIndex},
     writer::write_sorted_rows,
 };
 use merutable::types::{

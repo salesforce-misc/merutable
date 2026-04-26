@@ -13,7 +13,7 @@
 use crate::types::sequence::SeqNum;
 use bytes::Bytes;
 
-use crate::memtable::skiplist::{decode_seq_from_key, user_key_of, EntryValue};
+use crate::memtable::skiplist::{EntryValue, decode_seq_from_key, user_key_of};
 
 /// A snapshot of one memtable entry, ready for the merge layer.
 #[derive(Clone, Debug)]

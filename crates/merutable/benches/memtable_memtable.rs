@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use merutable::memtable::memtable::Memtable;
 use merutable::types::sequence::SeqNum;
 use merutable::wal::batch::WriteBatch;

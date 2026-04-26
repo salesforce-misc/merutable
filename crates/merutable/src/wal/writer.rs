@@ -10,7 +10,7 @@ use std::io::Write;
 use crate::types::{MeruError, Result};
 use crc32fast::Hasher as Crc32;
 
-use crate::wal::format::{RecordType, BLOCK_SIZE, HEADER_SIZE, RECYCLABLE_HEADER_SIZE};
+use crate::wal::format::{BLOCK_SIZE, HEADER_SIZE, RECYCLABLE_HEADER_SIZE, RecordType};
 
 /// Pluggable WAL sink. Local filesystem: `std::fs::File`.
 /// Distributed/consensus WAL: implement this trait (e.g., Raft append log).

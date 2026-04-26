@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     level::{FileFormat, Level},
     schema::{ColumnType, TableSchema},
     value::{FieldValue, Row},
-    MeruError, Result,
 };
 use arrow::array::{
     ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array,

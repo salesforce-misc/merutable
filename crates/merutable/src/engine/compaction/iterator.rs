@@ -267,7 +267,7 @@ mod tests {
         let iter = CompactionIterator::new(fe, SeqNum(100), false);
         let results: Vec<_> = iter.collect();
         assert_eq!(results.len(), 3); // keys 1, 2, 3
-                                      // Key 1 should come from file 0 (seq=10, newer).
+        // Key 1 should come from file 0 (seq=10, newer).
         assert_eq!(results[0].ikey.seq, SeqNum(10));
         assert_eq!(results[0].source_file_idx, 0);
     }
