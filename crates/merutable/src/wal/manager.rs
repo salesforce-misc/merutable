@@ -11,12 +11,12 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use crate::types::{sequence::SeqNum, MeruError, Result};
+use crate::types::{MeruError, Result, sequence::SeqNum};
 use tracing::{debug, info, trace, warn};
 
 use crate::wal::{
@@ -248,12 +248,12 @@ impl WalManager {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(log_num) = parse_log_number(&name) {
-                if log_num < before_log {
-                    let path = entry.path();
-                    debug!(log_num, path = %path.display(), "GC WAL file");
-                    let _ = std::fs::remove_file(&path);
-                }
+            if let Some(log_num) = parse_log_number(&name)
+                && log_num < before_log
+            {
+                let path = entry.path();
+                debug!(log_num, path = %path.display(), "GC WAL file");
+                let _ = std::fs::remove_file(&path);
             }
         }
         Ok(())

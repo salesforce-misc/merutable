@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use crate::types::{
+    Result,
     key::InternalKey,
     sequence::{OpType, SeqNum},
     value::{FieldValue, Row},
-    Result,
 };
 use crate::wal::batch::WriteBatch;
 use bytes::Bytes;
@@ -249,23 +249,22 @@ pub async fn apply_batch(engine: &Arc<MeruEngine>, batch: MutationBatch) -> Resu
     // F regression). `rotation_lock` serializes bursts so only one writer
     // actually rotates; later writers re-check under the lock and find the
     // fresh (small) active memtable.
-    if should_flush {
-        if let Ok(_guard) = engine.rotation_lock.try_lock() {
-            if engine.memtable.active_should_flush() {
-                let next_seq = engine.global_seq.current().next();
-                engine.memtable.rotate(next_seq);
-                {
-                    let mut wal = engine.wal.lock().await;
-                    wal.rotate()?;
-                }
-                let engine = Arc::clone(engine);
-                tokio::spawn(async move {
-                    if let Err(e) = crate::engine::flush::run_flush(&engine).await {
-                        tracing::error!(error = %e, "auto-flush failed");
-                    }
-                });
-            }
+    if should_flush
+        && let Ok(_guard) = engine.rotation_lock.try_lock()
+        && engine.memtable.active_should_flush()
+    {
+        let next_seq = engine.global_seq.current().next();
+        engine.memtable.rotate(next_seq);
+        {
+            let mut wal = engine.wal.lock().await;
+            wal.rotate()?;
         }
+        let engine = Arc::clone(engine);
+        tokio::spawn(async move {
+            if let Err(e) = crate::engine::flush::run_flush(&engine).await {
+                tracing::error!(error = %e, "auto-flush failed");
+            }
+        });
     }
 
     Ok(base_seq)

@@ -5,13 +5,16 @@
 // PyO3's #[pymethods] proc macro generates internal `Into<PyErr>` conversions
 // that clippy flags as useless. These are not in our code.
 #![allow(clippy::useless_conversion)]
+// PyO3 0.22 macros emit bare unsafe ops inside unsafe fns, which edition 2024
+// flags as `unsafe_op_in_unsafe_fn`. Suppress until PyO3 upgrade (issue #77).
+#![allow(unsafe_op_in_unsafe_fn)]
 
 mod convert;
 
 use std::sync::Arc;
 
-use ::merutable::types::schema::{ColumnDef, TableSchema};
 use ::merutable::MeruDB as RustMeruDB;
+use ::merutable::types::schema::{ColumnDef, TableSchema};
 use pyo3::{prelude::*, types::PyDict};
 
 /// Python-visible MeruDB wrapper.

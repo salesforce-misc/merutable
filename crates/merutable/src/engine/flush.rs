@@ -17,11 +17,11 @@ use std::sync::Arc;
 use crate::iceberg::{IcebergDataFile, SnapshotTransaction};
 use crate::memtable::iterator::MemEntry;
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     level::{Level, ParquetFileMeta},
     sequence::SeqNum,
     value::Row,
-    MeruError, Result,
 };
 use tracing::{debug, info, instrument};
 
@@ -197,10 +197,10 @@ pub async fn run_flush(engine: &Arc<MeruEngine>) -> Result<()> {
         // IMP-19: fsync the data directory so the directory entry for the
         // new file is durable.  POSIX: fsync on a file syncs data+metadata
         // of the file itself but NOT the directory containing the link.
-        if let Some(parent) = full_path.parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
-                let _ = dir.sync_all().await;
-            }
+        if let Some(parent) = full_path.parent()
+            && let Ok(dir) = tokio::fs::File::open(parent).await
+        {
+            let _ = dir.sync_all().await;
         }
 
         parquet_bytes.len() as u64

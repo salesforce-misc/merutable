@@ -1,7 +1,8 @@
 [package]
 name    = "merutable-python"
 version = "0.1.0"
-edition = "2021"
+edition = { workspace = true }
+rust-version = { workspace = true }
 description = "Python bindings for merutable via PyO3"
 license = "Apache-2.0"
 publish = false

@@ -1,17 +1,17 @@
 //! `MeruEngine`: central orchestrator. Owns WAL, memtable, version set, catalog,
 //! and background workers. All public operations go through this struct.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::iceberg::{IcebergCatalog, VersionSet};
 use crate::memtable::manager::MemtableManager;
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     schema::TableSchema,
     sequence::{GlobalSeq, OpType, SeqNum},
     value::{FieldValue, Row},
-    MeruError, Result,
 };
 use crate::wal::{batch::WriteBatch, manager::WalManager};
 use tokio::sync::Mutex;
@@ -558,27 +558,25 @@ impl MeruEngine {
         // see the same stale `should_flush=true` during a burst — serialize
         // rotation through `rotation_lock` and re-check under the lock so
         // only one task actually seals and spawns a flush.
-        if should_flush {
-            if let Ok(_guard) = self.rotation_lock.try_lock() {
-                // Stale should_flush from another task's apply_batch? If the
-                // active memtable was already rotated out from under us, the
-                // new active is small and we have nothing to do.
-                if self.memtable.active_should_flush() {
-                    let next_seq = self.global_seq.current().next();
-                    self.memtable.rotate(next_seq);
-                    // Rotate the WAL as well so the sealed memtable's
-                    // writes live in a closed log that GC can reclaim.
-                    {
-                        let mut wal = self.wal.lock().await;
-                        wal.rotate()?;
-                    }
-                    let engine = Arc::clone(self);
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::engine::flush::run_flush(&engine).await {
-                            tracing::error!(error = %e, "auto-flush failed");
-                        }
-                    });
+        if should_flush && let Ok(_guard) = self.rotation_lock.try_lock() {
+            // Stale should_flush from another task's apply_batch? If the
+            // active memtable was already rotated out from under us, the
+            // new active is small and we have nothing to do.
+            if self.memtable.active_should_flush() {
+                let next_seq = self.global_seq.current().next();
+                self.memtable.rotate(next_seq);
+                // Rotate the WAL as well so the sealed memtable's
+                // writes live in a closed log that GC can reclaim.
+                {
+                    let mut wal = self.wal.lock().await;
+                    wal.rotate()?;
                 }
+                let engine = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(e) = crate::engine::flush::run_flush(&engine).await {
+                        tracing::error!(error = %e, "auto-flush failed");
+                    }
+                });
             }
         }
 
@@ -649,8 +647,8 @@ impl MeruEngine {
                 wal.rotate()?;
             }
         } // rotation_lock dropped
-          // Flush all immutables. `run_flush` calls `mark_flushed_seq` which
-          // GCs the matching closed WAL file as a side effect.
+        // Flush all immutables. `run_flush` calls `mark_flushed_seq` which
+        // GCs the matching closed WAL file as a side effect.
         while self.memtable.oldest_immutable().is_some() {
             crate::engine::flush::run_flush(self).await?;
         }

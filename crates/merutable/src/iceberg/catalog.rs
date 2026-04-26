@@ -38,7 +38,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::types::{level::Level, schema::TableSchema, MeruError, Result};
+use crate::types::{MeruError, Result, level::Level, schema::TableSchema};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -1236,12 +1236,13 @@ mod tests {
         // File exists under metadata/ with the expected name.
         assert!(out.exists());
         assert!(out.starts_with(target.path().join("metadata")));
-        assert!(out
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .ends_with(".metadata.json"));
+        assert!(
+            out.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".metadata.json")
+        );
 
         // version-hint.text must point at the emitted snapshot.
         let hint = tokio::fs::read_to_string(target.path().join("version-hint.text"))

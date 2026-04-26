@@ -59,10 +59,10 @@ use std::cmp::Ordering;
 use bytes::Bytes;
 
 use crate::types::{
-    schema::{ColumnType, TableSchema},
-    sequence::{OpType, SeqNum, SEQNUM_MAX},
-    value::FieldValue,
     MeruError, Result,
+    schema::{ColumnType, TableSchema},
+    sequence::{OpType, SEQNUM_MAX, SeqNum},
+    value::FieldValue,
 };
 
 /// An internal key: PK values + sequence number + operation type, pre-encoded
@@ -137,7 +137,7 @@ impl InternalKey {
             _ => {
                 return Err(MeruError::Corruption(format!(
                     "unknown op_type {op_byte:#x}"
-                )))
+                )));
             }
         };
         let pk_values = decode_pk_fields(pk_bytes, schema)?;
@@ -452,7 +452,7 @@ mod tests {
     use super::*;
     use crate::types::{
         schema::{ColumnDef, ColumnType, TableSchema},
-        sequence::{OpType, SeqNum, SEQNUM_MAX},
+        sequence::{OpType, SEQNUM_MAX, SeqNum},
         value::FieldValue,
     };
 

@@ -13,7 +13,7 @@
 use crate::types::sequence::SeqNum;
 use bytes::Bytes;
 
-use crate::memtable::skiplist::{decode_seq_from_key, user_key_of, EntryValue};
+use crate::memtable::skiplist::{EntryValue, decode_seq_from_key, user_key_of};
 
 /// A snapshot of one memtable entry, ready for the merge layer.
 #[derive(Clone, Debug)]
@@ -59,10 +59,10 @@ impl<'a> Iterator for MemtableIterator<'a> {
             // newer seq first for the same PK, the first entry we see for a given
             // user_key is always the most recent. Subsequent entries for the same
             // user_key are older versions — skip them.
-            if let Some(ref last) = self.last_user_key {
-                if *last == uk {
-                    continue;
-                }
+            if let Some(ref last) = self.last_user_key
+                && *last == uk
+            {
+                continue;
             }
 
             self.last_user_key = Some(uk.clone());

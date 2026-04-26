@@ -34,11 +34,11 @@ use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::{
     BinaryExpr, Expr, Operator, TableProviderFilterPushDown, TableType,
 };
-use datafusion::physical_plan::memory::MemoryExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::memory::MemoryExec;
 
-use crate::sql::arrow::{change_feed_schema, records_to_record_batch};
 use crate::sql::ChangeFeedCursor;
+use crate::sql::arrow::{change_feed_schema, records_to_record_batch};
 
 /// A DataFusion-shaped view of the change feed. Register with a
 /// `SessionContext::register_table("merutable_changes", ..)` and
@@ -124,10 +124,10 @@ impl TableProvider for ChangeFeedTableProvider {
         // provider's own baseline since_seq (set at construction).
         let mut effective_since = self.since_seq;
         for f in filters {
-            if let Some(lb) = extract_seq_lower_bound(f) {
-                if lb > effective_since {
-                    effective_since = lb;
-                }
+            if let Some(lb) = extract_seq_lower_bound(f)
+                && lb > effective_since
+            {
+                effective_since = lb;
             }
         }
 

@@ -6,7 +6,7 @@ pub mod snapshot;
 pub mod translate;
 pub mod version;
 
-pub use catalog::{load_persisted_schema, IcebergCatalog};
+pub use catalog::{IcebergCatalog, load_persisted_schema};
 pub use deletion_vector::{DeletionVector, PuffinEncoded};
 pub use manifest::{DvLocation, Manifest, ManifestEntry};
 pub use snapshot::{IcebergDataFile, SnapshotTransaction};

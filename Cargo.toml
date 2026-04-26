@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 # Issue #38: collapsed all internal merutable-* crates into the
 # single `merutable` crate. Only `merutable` (the published library)
 # and `merutable-python` (cdylib for PyO3 bindings; can't merge into
@@ -16,6 +16,10 @@ members = [
 default-members = [
     "crates/merutable",
 ]
+
+[workspace.package]
+edition      = "2024"
+rust-version = "1.88.0"
 
 [workspace.dependencies]
 # Parquet / Arrow (arrow-rs monorepo)

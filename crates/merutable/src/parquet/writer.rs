@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use crate::types::{
+    MeruError, Result,
     key::InternalKey,
     level::{ColumnStats, FileFormat, Level, ParquetFileMeta},
     schema::{ColumnType, TableSchema},
     value::Row,
-    MeruError, Result,
 };
 use bytes::Bytes;
 use parquet::{
@@ -719,7 +719,7 @@ mod tests {
     };
     use bytes::Bytes as BBytes;
 
-    use crate::parquet::kv_index::{KvSparseIndex, KV_INDEX_FOOTER_KEY};
+    use crate::parquet::kv_index::{KV_INDEX_FOOTER_KEY, KvSparseIndex};
 
     fn kv_index_test_schema() -> TableSchema {
         TableSchema {

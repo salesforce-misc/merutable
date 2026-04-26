@@ -29,8 +29,8 @@
 //! to reproduce the ENOENT; after the fix it stays green across
 //! runs.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;

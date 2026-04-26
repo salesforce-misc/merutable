@@ -5,19 +5,19 @@
 //! `advance_or_recover()` hard-resets the replica to the latest
 //! mirrored base snapshot with a fresh empty tail.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
+use merutable::MeruDB;
 use merutable::replica::{AdvanceOutcome, InProcessLogSource, LogSource, OpRecord, Replica};
 use merutable::types::{
+    MeruError, Result,
     schema::{ColumnDef, ColumnType, TableSchema},
     value::{FieldValue, Row},
-    MeruError, Result,
 };
-use merutable::MeruDB;
 
 fn schema() -> TableSchema {
     TableSchema {

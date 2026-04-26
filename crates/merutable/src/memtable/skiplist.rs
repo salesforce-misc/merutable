@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::types::sequence::{OpType, SeqNum, SEQNUM_MAX};
+use crate::types::sequence::{OpType, SEQNUM_MAX, SeqNum};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 

@@ -21,8 +21,8 @@
 //! The `AtomicBool` is checked at the top of each loop iteration and
 //! is set by `shutdown()` BEFORE notifying; a worker cannot miss both.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};

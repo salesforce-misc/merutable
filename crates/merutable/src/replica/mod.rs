@@ -48,7 +48,7 @@
 //!   harness is a future, outside-the-crate effort.
 
 use crate::sql::ChangeOp;
-use crate::types::{value::Row, MeruError, Result};
+use crate::types::{MeruError, Result, value::Row};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
@@ -763,7 +763,7 @@ impl Replica {
                          throughput; raise `Replica::set_rebase_timeout` or \
                          reduce primary load. The replica's old state is still \
                          serving reads (this call left it untouched)."
-                    )))
+                    )));
                 }
             }
         } else {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::types::{value::FieldValue, MeruError, Result};
+use crate::types::{MeruError, Result, value::FieldValue};
 
 /// Parquet-native column types. Schema is immutable after table creation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

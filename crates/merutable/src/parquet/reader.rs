@@ -11,11 +11,11 @@
 use std::sync::Arc;
 
 use crate::types::{
-    key::InternalKey, level::ParquetFileMeta, schema::TableSchema, sequence::SeqNum, value::Row,
-    MeruError, Result,
+    MeruError, Result, key::InternalKey, level::ParquetFileMeta, schema::TableSchema,
+    sequence::SeqNum, value::Row,
 };
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use parquet::file::reader::{ChunkReader, FileReader, SerializedFileReader};
 use roaring::RoaringBitmap;
 
@@ -23,7 +23,7 @@ use crate::parquet::{
     bloom::FastLocalBloom,
     codec::{self, IKEY_COLUMN_NAME, VALUE_BLOB_COLUMN_NAME},
     footer::decode_footer_kv,
-    kv_index::{KvSparseIndex, PageLocation, KV_INDEX_FOOTER_KEY},
+    kv_index::{KV_INDEX_FOOTER_KEY, KvSparseIndex, PageLocation},
 };
 
 pub struct ParquetReader<R: ChunkReader + Clone> {
@@ -115,10 +115,10 @@ impl<R: ChunkReader + Clone + 'static> ParquetReader<R> {
         deleted_rows: Option<&RoaringBitmap>,
     ) -> Result<Option<(InternalKey, Row)>> {
         // Bloom gate.
-        if let Some(bloom) = &self.bloom {
-            if !bloom.may_contain(user_key_bytes) {
-                return Ok(None);
-            }
+        if let Some(bloom) = &self.bloom
+            && !bloom.may_contain(user_key_bytes)
+        {
+            return Ok(None);
         }
 
         // Check file-level key range.
@@ -236,10 +236,10 @@ impl<R: ChunkReader + Clone + 'static> ParquetReader<R> {
                 // Bug M: match the safe u32::try_from pattern used in
                 // read_physical_rows_with_positions. Positions beyond u32::MAX
                 // cannot be in the DV bitmap, so treat them as not-deleted.
-                if let Ok(pos32) = u32::try_from(global_pos) {
-                    if dv.contains(pos32) {
-                        continue;
-                    }
+                if let Ok(pos32) = u32::try_from(global_pos)
+                    && dv.contains(pos32)
+                {
+                    continue;
                 }
             }
             if ikey.user_key_bytes() != user_key_bytes {
@@ -277,30 +277,30 @@ impl<R: ChunkReader + Clone + 'static> ParquetReader<R> {
             if let Some(dv) = deleted_rows {
                 // Bug M: safe u32 conversion — positions beyond u32::MAX
                 // cannot appear in a RoaringBitmap, so skip the DV check.
-                if let Ok(pos32) = u32::try_from(global_pos) {
-                    if dv.contains(pos32) {
-                        continue;
-                    }
+                if let Ok(pos32) = u32::try_from(global_pos)
+                    && dv.contains(pos32)
+                {
+                    continue;
                 }
             }
             if ikey.seq > read_seq {
                 continue;
             }
             let uk = ikey.user_key_bytes().to_vec();
-            if let Some(start) = start_user_key {
-                if uk.as_slice() < start {
-                    continue;
-                }
+            if let Some(start) = start_user_key
+                && uk.as_slice() < start
+            {
+                continue;
             }
-            if let Some(end) = end_user_key {
-                if uk.as_slice() >= end {
-                    break;
-                }
+            if let Some(end) = end_user_key
+                && uk.as_slice() >= end
+            {
+                break;
             }
-            if let Some(ref last) = last_uk {
-                if *last == uk {
-                    continue;
-                }
+            if let Some(ref last) = last_uk
+                && *last == uk
+            {
+                continue;
             }
             last_uk = Some(uk);
             // Tombstones are NOT dropped here — the caller handles them
@@ -336,10 +336,10 @@ impl<R: ChunkReader + Clone + 'static> ParquetReader<R> {
                     "row position {pos} exceeds u32::MAX in Parquet file"
                 ))
             })?;
-            if let Some(dv) = deleted_rows {
-                if dv.contains(pos_u32) {
-                    continue;
-                }
+            if let Some(dv) = deleted_rows
+                && dv.contains(pos_u32)
+            {
+                continue;
             }
             out.push((ikey, row, pos_u32));
         }

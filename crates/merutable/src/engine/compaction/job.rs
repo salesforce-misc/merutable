@@ -14,14 +14,14 @@
 
 use std::{path::Path, sync::Arc};
 
-use crate::iceberg::{version::DataFileMeta, DeletionVector, IcebergDataFile, SnapshotTransaction};
+use crate::iceberg::{DeletionVector, IcebergDataFile, SnapshotTransaction, version::DataFileMeta};
 use crate::parquet::reader::ParquetReader;
 use crate::types::{
+    MeruError, Result,
     level::Level,
     level::ParquetFileMeta,
     schema::TableSchema,
     value::{FieldValue, Row},
-    MeruError, Result,
 };
 use bytes::Bytes;
 use roaring::RoaringBitmap;
@@ -561,10 +561,10 @@ async fn run_one_compaction_job(engine: &Arc<MeruEngine>) -> Result<bool> {
 
         // IMP-19: fsync the data directory so the new file's directory
         // entry is durable before the manifest commit.
-        if let Some(parent) = full_path.parent() {
-            if let Ok(dir) = tokio::fs::File::open(parent).await {
-                let _ = dir.sync_all().await;
-            }
+        if let Some(parent) = full_path.parent()
+            && let Ok(dir) = tokio::fs::File::open(parent).await
+        {
+            let _ = dir.sync_all().await;
         }
 
         let meta = ParquetFileMeta {

@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use crate::types::{sequence::SeqNum, Result};
+use crate::types::{Result, sequence::SeqNum};
 use bytes::Bytes;
 
 use crate::memtable::{

@@ -1108,7 +1108,7 @@ async fn l0_stop_trigger_blocks_writes_until_drained() {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = test_config(&tmp);
     config.memtable_size_bytes = 64 * 1024 * 1024; // don't auto-flush
-                                                   // Tight triggers so the test produces few files.
+    // Tight triggers so the test produces few files.
     config.l0_compaction_trigger = 100; // picker's score-based path off
     config.l0_slowdown_trigger = 4;
     config.l0_stop_trigger = 6;

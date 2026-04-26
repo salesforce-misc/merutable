@@ -93,9 +93,9 @@ use std::sync::Arc;
 
 use crate::engine::engine::MeruEngine;
 use crate::types::{
+    MeruError, Result,
     sequence::{OpType, SeqNum},
     value::Row,
-    MeruError, Result,
 };
 
 pub mod arrow;

@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use merutable::engine::{background::BackgroundWorkers, EngineConfig, MeruEngine};
+use merutable::engine::{EngineConfig, MeruEngine, background::BackgroundWorkers};
 use merutable::types::schema::{ColumnDef, ColumnType, TableSchema};
 use tempfile::TempDir;
 
