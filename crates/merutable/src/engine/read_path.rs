@@ -147,14 +147,14 @@ pub fn point_lookup(engine: &MeruEngine, pk_values: &[FieldValue]) -> Result<Opt
         if let Some((hit_ikey, row)) = reader.get(&user_key_bytes, read_seq, dv.as_ref())? {
             // Populate cache before returning — only if no concurrent
             // invalidation raced with this read.
-            if let (Some(ref cache), Some(gen)) = (&engine.row_cache, cache_gen) {
+            if let (Some(cache), Some(generation)) = (&engine.row_cache, cache_gen) {
                 cache.insert_if_fresh(
                     user_key_bytes.clone(),
                     crate::engine::cache::CacheEntry {
                         op_type: hit_ikey.op_type,
                         row: row.clone(),
                     },
-                    gen,
+                    generation,
                 );
             }
             if hit_ikey.op_type == OpType::Delete {
@@ -174,14 +174,14 @@ pub fn point_lookup(engine: &MeruEngine, pk_values: &[FieldValue]) -> Result<Opt
         };
         let (reader, dv) = open_file(base, file, engine.schema.clone())?;
         if let Some((hit_ikey, row)) = reader.get(&user_key_bytes, read_seq, dv.as_ref())? {
-            if let (Some(ref cache), Some(gen)) = (&engine.row_cache, cache_gen) {
+            if let (Some(cache), Some(generation)) = (&engine.row_cache, cache_gen) {
                 cache.insert_if_fresh(
                     user_key_bytes.clone(),
                     crate::engine::cache::CacheEntry {
                         op_type: hit_ikey.op_type,
                         row: row.clone(),
                     },
-                    gen,
+                    generation,
                 );
             }
             if hit_ikey.op_type == OpType::Delete {

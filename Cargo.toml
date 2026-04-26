@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 # Issue #38: collapsed all internal merutable-* crates into the
 # single `merutable` crate. Only `merutable` (the published library)
 # and `merutable-python` (cdylib for PyO3 bindings; can't merge into
@@ -18,6 +18,7 @@ default-members = [
 ]
 
 [workspace.package]
+edition      = "2024"
 rust-version = "1.88.0"
 
 [workspace.dependencies]

@@ -228,12 +228,12 @@ mod tests {
         cache.insert(b"k".to_vec(), make_entry(1));
 
         // Reader captures generation, then the cache is invalidated.
-        let gen = cache.snapshot_generation();
+        let generation = cache.snapshot_generation();
         cache.invalidate(b"k");
         assert!(cache.get(b"k").is_none());
 
         // Reader tries to reinstall the (now-stale) value. Must be dropped.
-        cache.insert_if_fresh(b"k".to_vec(), make_entry(42), gen);
+        cache.insert_if_fresh(b"k".to_vec(), make_entry(42), generation);
         assert!(
             cache.get(b"k").is_none(),
             "insert_if_fresh must drop when generation advanced"
@@ -243,17 +243,17 @@ mod tests {
     #[test]
     fn insert_if_fresh_rejects_after_clear() {
         let cache = RowCache::new(10);
-        let gen = cache.snapshot_generation();
+        let generation = cache.snapshot_generation();
         cache.clear();
-        cache.insert_if_fresh(b"k".to_vec(), make_entry(42), gen);
+        cache.insert_if_fresh(b"k".to_vec(), make_entry(42), generation);
         assert!(cache.get(b"k").is_none());
     }
 
     #[test]
     fn insert_if_fresh_succeeds_without_races() {
         let cache = RowCache::new(10);
-        let gen = cache.snapshot_generation();
-        cache.insert_if_fresh(b"k".to_vec(), make_entry(42), gen);
+        let generation = cache.snapshot_generation();
+        cache.insert_if_fresh(b"k".to_vec(), make_entry(42), generation);
         assert!(cache.get(b"k").is_some());
     }
 
