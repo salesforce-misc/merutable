@@ -12,7 +12,7 @@
   <rect width="1100" height="900" fill="#FAFAFA" rx="8"/>
 
   <!-- Title -->
-  <text x="550" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#212121">merutable — LSM + Iceberg v3 Architecture</text>
+  <text x="550" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#212121">merutable — LSM + Iceberg-compatible export Architecture</text>
 
   <!-- ═══════════════════════════════════════════════════════ -->
   <!-- ROW 1 (y=50..410): Write Path + LSM Levels + Iceberg  -->
@@ -70,10 +70,6 @@
   <text x="430" y="245" text-anchor="middle" font-size="7" fill="#C2185B">Bloom</text>
   <rect x="400" y="251" width="60" height="13" rx="3" fill="#F3E5F5" stroke="#9C27B0" stroke-width="0.5"/>
   <text x="430" y="261" text-anchor="middle" font-size="7" fill="#7B1FA2">KvSparseIdx</text>
-  <rect x="470" y="235" width="70" height="30" rx="3" fill="#FFF3E0" stroke="#FF9800" stroke-width="0.5"/>
-  <text x="505" y="249" text-anchor="middle" font-size="7" fill="#E65100">Deletion</text>
-  <text x="505" y="260" text-anchor="middle" font-size="7" fill="#E65100">Vector (DV)</text>
-
   <!-- Arrow: L1 → L2+ -->
   <line x1="395" y1="277" x2="395" y2="316" stroke="#546E7A" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="405" y="301" font-size="9" fill="#E65100">compact</text>
@@ -86,17 +82,13 @@
   <text x="395" y="368" text-anchor="middle" font-size="9" font-weight="600" fill="#2E7D32">Analytics-optimized typed columns</text>
   <text x="395" y="379" text-anchor="middle" font-size="7" fill="#43A047">DELTA_BINARY_PACKED · BYTE_STREAM_SPLIT · RLE_DICTIONARY</text>
 
-  <!-- ── RIGHT: Iceberg v3 ── -->
-  <text x="620" y="60" font-size="11" font-weight="bold" fill="#6A1B9A">ICEBERG v3</text>
+  <!-- ── RIGHT: Iceberg export ── -->
+  <text x="620" y="60" font-size="11" font-weight="bold" fill="#6A1B9A">ICEBERG</text>
 
   <rect x="600" y="70" width="200" height="55" rx="4" fill="#F3E5F5" stroke="#6A1B9A" stroke-width="1.5"/>
-  <text x="700" y="88" text-anchor="middle" font-size="10" font-weight="600" fill="#4A148C">Manifest (format_version=3)</text>
-  <text x="700" y="101" text-anchor="middle" font-size="8" fill="#7B1FA2">snapshots · file entries · DV coords</text>
-  <text x="700" y="113" text-anchor="middle" font-size="8" fill="#7B1FA2">every commit = new snapshot</text>
-
-  <rect x="600" y="140" width="220" height="40" rx="4" fill="#FFF3E0" stroke="#E65100" stroke-width="1"/>
-  <text x="710" y="158" text-anchor="middle" font-size="10" font-weight="600" fill="#BF360C">Puffin DV Files</text>
-  <text x="710" y="171" text-anchor="middle" font-size="7" fill="#E65100">deletion-vector-v1 · D1D33964 magic · CRC32</text>
+  <text x="700" y="88" text-anchor="middle" font-size="10" font-weight="600" fill="#4A148C">export_iceberg(path)</text>
+  <text x="700" y="101" text-anchor="middle" font-size="8" fill="#7B1FA2">metadata.json · manifest-list · manifest</text>
+  <text x="700" y="113" text-anchor="middle" font-size="8" fill="#7B1FA2">format-version = 2</text>
 
   <!-- Arrow: LSM → Manifest -->
   <line x1="552" y1="97" x2="598" y2="97" stroke="#6A1B9A" stroke-width="1" marker-end="url(#arrow)"/>
@@ -144,10 +136,10 @@
   <text x="560" y="515" text-anchor="middle" font-size="8" fill="#E53935">no ETL · no format conversion</text>
 
   <text x="700" y="490" font-size="9" fill="#37474F" font-style="italic">Read: memtable → L0 (bloom → KvSparseIndex) → L1+</text>
-  <text x="700" y="504" font-size="9" fill="#37474F" font-style="italic">Write: WAL → memtable → flush → native manifest (Iceberg v2 superset)</text>
+  <text x="700" y="504" font-size="9" fill="#37474F" font-style="italic">Write: WAL → memtable → flush → native manifest</text>
 
-  <text x="550" y="550" text-anchor="middle" font-size="10" fill="#F57F17" font-weight="600">Native JSON manifest — strict superset of Apache Iceberg v2 TableMetadata.</text>
-  <text x="550" y="563" text-anchor="middle" font-size="9" fill="#795548">db.export_iceberg(target) projects to a spec-compliant metadata.json on demand.</text>
+  <text x="550" y="550" text-anchor="middle" font-size="10" fill="#F57F17" font-weight="600">db.export_iceberg(path) emits a spec-clean Iceberg v2 chain on demand.</text>
+  <text x="550" y="563" text-anchor="middle" font-size="9" fill="#795548">metadata.json + manifest-list Avro + manifest Avro → DuckDB iceberg_scan, pyiceberg, Spark, Trino.</text>
 
   <!-- ═══════════════════════════════════════════════════════ -->
   <!-- ROW 3 (y=600..790): Per-Level Parquet Format — detail -->
@@ -173,7 +165,6 @@
   <text x="395" y="684" font-size="9" fill="#37474F">Encoding: per-column (DELTA, SPLIT, DICT)</text>
   <text x="395" y="698" font-size="9" fill="#37474F">Columns: _ikey + typed (no blob)</text>
   <text x="395" y="716" font-size="9" fill="#E65100" font-weight="600">Bias: transitional, read+write balanced</text>
-  <text x="395" y="730" font-size="8" fill="#78909C" font-style="italic">Deletion Vectors track promoted rows</text>
 
   <!-- L2+ detail -->
   <rect x="720" y="635" width="330" height="120" rx="4" fill="white" stroke="#FF9800" stroke-width="1"/>

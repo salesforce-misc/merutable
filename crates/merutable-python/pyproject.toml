@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "merutable"
 version = "0.1.0"
 description = "Python bindings for merutable — an embeddable single-table engine with row + columnar Parquet and Iceberg-compatible metadata"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 
 [tool.maturin]

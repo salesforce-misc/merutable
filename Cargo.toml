@@ -12,7 +12,7 @@ members = [
 ]
 # merutable-python requires Python dev headers + PyO3; exclude from
 # default `cargo test/clippy --workspace` so CI doesn't need Python.
-# Build it explicitly via `maturin develop` (see lab/setup.sh).
+# Build it explicitly via `maturin develop`.
 default-members = [
     "crates/merutable",
 ]

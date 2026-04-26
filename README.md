@@ -110,17 +110,6 @@ Deeper reads:
 [`docs/TAXONOMY.md`](docs/TAXONOMY.md) ·
 [`DEVELOPER.md`](DEVELOPER.md)
 
-## Lab notebook
-
-[`lab/lab_merutable.ipynb`](lab/lab_merutable.ipynb) — a live, runnable
-showcase comparing merutable against DuckDB head-to-head, then demonstrating
-the zero-ETL federated read (fresh memtable rows inside merutable, columnar
-analytical reads from DuckDB against the same on-disk Parquet).
-
-```bash
-cd lab && bash setup.sh
-```
-
 ## Status
 
 | Area              | 0.0.1                                                               |

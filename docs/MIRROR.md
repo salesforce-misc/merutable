@@ -82,13 +82,12 @@ bucket/prefix/
 │   └── low_water.txt         # if reclaim has happened (#26 Phase 6)
 └── data/
     ├── L0/*.parquet
-    ├── L0/*.dv-{v}.puffin    # deletion vectors
     ├── L1/*.parquet
     └── L2/*.parquet
 ```
 
-Same file paths, same manifest format, same backward-pointer chain,
-same puffin DV conventions. This is the critical property.
+Same file paths, same manifest format, same backward-pointer chain.
+This is the critical property.
 
 **It means any reader that can open an `ObjectStore`-mode bucket can
 open a mirror destination.** There is no "restore from mirror" step,

@@ -5,54 +5,31 @@ This file exists to ground ambiguous README wording against the code
 that actually runs in production. When the README and this file
 disagree, this file wins and the README is wrong.
 
-## Deletion Vectors: read-side live, write-side dormant
+## Deletion Vectors: honored on read, not emitted
 
-**Read-side (live).** On every compaction merge, each input file is
-opened with its associated DV, if any, and the DV's marked row
-positions are filtered out before the merge iterator sees them.
-Implementation: `crates/merutable/src/engine/compaction/job.rs`
-(`open_source_file`). This is load-bearing for Apache Iceberg v3
-interop — an external writer (Spark, pyiceberg, Trino) is permitted
-to stamp a DV on a data file that merutable owns, and merutable will
-honor it on the next merge that touches the file. Removing the
-read-side would break v3 compatibility.
+merutable's own deletes are tombstone rows written through the normal
+LSM write path (`db.delete(pk)` → `write_internal(.., OpType::Delete)`);
+compaction reconciles them. No part of merutable's commit pipeline
+produces a Puffin `deletion-vector-v1` blob.
 
-**Write-side (dormant).** The API for constructing a DV-stamping
-commit exists and is verified: `SnapshotTransaction::add_dv(path,
-dv)` in `crates/merutable/src/iceberg/snapshot.rs`, backed by the
-Puffin v3 `deletion-vector-v1` encoder in
-`crates/merutable/src/iceberg/deletion_vector.rs`, with the
-post-union cardinality validation performed in
-`IcebergCatalog::commit` (IMP-17). The full path round-trips in the
-catalog test suite.
+What merutable *does* do is honor DVs if it encounters them. On every
+compaction merge and every read path, each input file is opened with
+its associated DV (if the manifest entry has a `dv_path`) and the
+marked row positions are filtered out before the merge iterator sees
+them. Implementation:
+`crates/merutable/src/engine/compaction/job.rs:open_source_file`,
+`crates/merutable/src/engine/read_path.rs`.
 
-**No production caller of the write-side exists.** Every compaction
-is a full rewrite — input files are fully consumed and removed via
-`txn.remove_file(path)`. There is no residual source file on which
-a DV could be stamped. Consequently the `deletion-vector-v1` blob
-type is never emitted as output of any merutable-owned write.
+This matters for Apache Iceberg v3 interop. An external writer
+(Spark, pyiceberg, Trino) can stamp a DV on a merutable-owned data
+file, and merutable will honor it on the next merge that touches the
+file. Removing the read-side would break v3 compatibility.
 
-**Why this is intentional.** Full-rewrite compaction is the simpler,
-lower-read-amplification model. Partial compaction (the mode that
-would exercise the write-side) trades ~10× lower write amplification
-at deep levels for ~1.5–3× higher read amplification on queries that
-touch a partially-rewritten file. That trade is workload-dependent,
-not universally better. The decision to keep merutable full-rewrite-
-only is documented in the [RFC #19](https://github.com/merutable/merutable/issues/19)
-outcome (stay full-rewrite-only; revisit if field data shows deep-
-level write-amp pain).
-
-**What this means for users.**
-
-- External writers CAN stamp DVs on merutable's files; those DVs are
-  honored on the next compaction.
-- merutable's commits NEVER produce DVs. A vanilla Iceberg v3 reader
-  looking at a merutable-only table will see zero DV blobs across
-  the commit history.
-- The code path for DV writes is not dead code; it is preserved for
-  the day partial compaction is implemented (see RFC #19) or for
-  future compatibility experiments that stamp DVs from an external
-  tooling layer (e.g. row-level deletes via an admin CLI).
+The Puffin v3 `deletion-vector-v1` encoder in
+`crates/merutable/src/iceberg/deletion_vector.rs` and the
+`SnapshotTransaction::add_dv` API exist so that external tooling or
+future library-level commit flows can construct DV-stamped commits
+against a merutable catalog. The engine itself does not call them.
 
 ## MVCC semantics seen by external readers
 

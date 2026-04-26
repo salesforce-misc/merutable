@@ -51,12 +51,11 @@ merutable has no such planner. See "Not HTAP" below.
 
 ### Iceberg-compatible
 
-Each commit writes a native JSON manifest that is a strict superset
-of Apache Iceberg v2 `TableMetadata`. The superset is losslessly
-projectable via `merutable::iceberg::translate`; a
-`db.export_iceberg(target_dir)` call emits a spec-compliant Iceberg
-v2 `metadata.json` any v2-aware reader (DuckDB, Spark, Trino,
-Snowflake, pyiceberg) can open.
+Each commit writes a native JSON manifest. On demand,
+`db.export_iceberg(target_dir)` projects it into a spec-clean
+Iceberg v2 chain (`metadata.json` + manifest-list + manifest Avro)
+any v2-aware reader (DuckDB, Spark, Trino, Snowflake, pyiceberg)
+can open.
 
 "Compatible" is deliberately weaker than "native":
 
@@ -65,9 +64,9 @@ Snowflake, pyiceberg) can open.
 - merutable is not a catalog. Hive, Glue, REST catalog integration
   is an external layer callers add on top of the exported
   `metadata.json`.
-- Manifest-list / manifest Avro file emission is follow-on work; for
-  inspection, catalog registration, and schema audit the
-  `metadata.json` alone is sufficient.
+- Export is an explicit, caller-invoked step. No Iceberg metadata is
+  written on every commit; the commit path stays on merutable's own
+  manifest.
 
 ## What merutable is NOT
 

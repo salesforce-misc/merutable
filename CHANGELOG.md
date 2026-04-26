@@ -19,13 +19,14 @@ Initial public release of the `merutable` crate.
   snapshot-aware tombstone dropping, bounded memory via
   `max_compaction_input_rows` / `max_compaction_bytes`.
 - **Row cache**: LRU cache for point lookups, invalidated on refresh.
-- **Iceberg v2 metadata**: native protobuf manifest format is a strict
-  superset of Iceberg v2. `export_iceberg(target_dir)` writes
-  `metadata.json` + Avro manifest-list + Avro manifest files. DuckDB
-  `iceberg_scan()`, Spark, Trino, and pyiceberg read the export
-  directly.
-- **Deletion vectors**: Iceberg v3 `deletion-vector-v1` Puffin blobs
-  for point deletes without rewriting data files.
+- **Iceberg v2 export**: `export_iceberg(target_dir)` projects the
+  native manifest into a spec-clean Iceberg v2 chain (`metadata.json`
+  + Avro manifest-list + Avro manifest files). DuckDB `iceberg_scan()`,
+  Spark, Trino, and pyiceberg read the export directly. Export is an
+  explicit step; commits themselves stay on the native manifest.
+- **Deletion vectors (read)**: Puffin `deletion-vector-v1` blobs
+  produced by external Iceberg writers are honored during reads and
+  compaction.
 - **SQL change-feed**: `merutable_changes(table, since_seq)` DataFusion
   table provider (feature `sql`, enabled by default). Supports INSERT /
   UPDATE / DELETE discrimination and seq-filter pushdown.
