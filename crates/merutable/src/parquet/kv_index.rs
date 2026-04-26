@@ -333,12 +333,13 @@ impl KvSparseIndex {
                     "kv_index: restart_offset[{i}] = {ro} exceeds entries_size {entries_size}"
                 )));
             }
-            if let Some(prev) = prev_ro {
-                if ro <= prev && i > 0 {
-                    return Err(MeruError::Corruption(format!(
-                        "kv_index: restart_offset[{i}] = {ro} is not > previous {prev}"
-                    )));
-                }
+            if let Some(prev) = prev_ro
+                && ro <= prev
+                && i > 0
+            {
+                return Err(MeruError::Corruption(format!(
+                    "kv_index: restart_offset[{i}] = {ro} is not > previous {prev}"
+                )));
             }
             prev_ro = Some(ro);
             restart_offsets.push(ro);

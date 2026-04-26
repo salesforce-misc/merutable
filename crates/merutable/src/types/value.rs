@@ -151,14 +151,13 @@ impl Row {
                     // guarantee.
                     if let (FieldValue::Bytes(b), ColumnType::FixedLenByteArray(n)) =
                         (fv, &col.col_type)
+                        && b.len() != *n as usize
                     {
-                        if b.len() != *n as usize {
-                            return Err(crate::types::MeruError::SchemaMismatch(format!(
-                                "column {idx} '{}': FixedLenByteArray({n}) got {} bytes",
-                                col.name,
-                                b.len(),
-                            )));
-                        }
+                        return Err(crate::types::MeruError::SchemaMismatch(format!(
+                            "column {idx} '{}': FixedLenByteArray({n}) got {} bytes",
+                            col.name,
+                            b.len(),
+                        )));
                     }
                 }
             }

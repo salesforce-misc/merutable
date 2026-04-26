@@ -59,10 +59,10 @@ impl<'a> Iterator for MemtableIterator<'a> {
             // newer seq first for the same PK, the first entry we see for a given
             // user_key is always the most recent. Subsequent entries for the same
             // user_key are older versions — skip them.
-            if let Some(ref last) = self.last_user_key {
-                if *last == uk {
-                    continue;
-                }
+            if let Some(ref last) = self.last_user_key
+                && *last == uk
+            {
+                continue;
             }
 
             self.last_user_key = Some(uk.clone());

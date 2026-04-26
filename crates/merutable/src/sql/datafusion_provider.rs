@@ -124,10 +124,10 @@ impl TableProvider for ChangeFeedTableProvider {
         // provider's own baseline since_seq (set at construction).
         let mut effective_since = self.since_seq;
         for f in filters {
-            if let Some(lb) = extract_seq_lower_bound(f) {
-                if lb > effective_since {
-                    effective_since = lb;
-                }
+            if let Some(lb) = extract_seq_lower_bound(f)
+                && lb > effective_since
+            {
+                effective_since = lb;
             }
         }
 

@@ -78,15 +78,15 @@ impl CompactionIterator {
 
         for entry in all {
             let uk = entry.ikey.user_key_bytes().to_vec();
-            if let Some(ref last) = last_uk {
-                if *last == uk {
-                    // Older version of the same key — only keep if an
-                    // active reader might need it.
-                    if entry.ikey.seq >= oldest_snapshot_seq {
-                        deduped.push(entry);
-                    }
-                    continue;
+            if let Some(ref last) = last_uk
+                && *last == uk
+            {
+                // Older version of the same key — only keep if an
+                // active reader might need it.
+                if entry.ikey.seq >= oldest_snapshot_seq {
+                    deduped.push(entry);
                 }
+                continue;
             }
             // New user key — this is the latest version (always kept).
             last_uk = Some(uk);

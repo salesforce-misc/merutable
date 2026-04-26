@@ -110,14 +110,14 @@ pub fn point_lookup(engine: &MeruEngine, pk_values: &[FieldValue]) -> Result<Opt
     }
 
     // Stop 1.5: Row cache (between memtable and file I/O).
-    if let Some(ref cache) = engine.row_cache {
-        if let Some(entry) = cache.get(&user_key_bytes) {
-            if entry.op_type == OpType::Delete {
-                return Ok(None);
-            }
-            trace!(source = "row_cache", "cache hit");
-            return Ok(Some(entry.row));
+    if let Some(ref cache) = engine.row_cache
+        && let Some(entry) = cache.get(&user_key_bytes)
+    {
+        if entry.op_type == OpType::Delete {
+            return Ok(None);
         }
+        trace!(source = "row_cache", "cache hit");
+        return Ok(Some(entry.row));
     }
 
     // Cache race fix: snapshot the generation BEFORE reading from disk.
@@ -321,15 +321,15 @@ pub fn range_scan(
     for entry in &mem_all {
         // Range gate — skip rows outside the requested range early.
         let uk = entry.user_key.as_ref();
-        if let Some(ref start) = start_bytes {
-            if uk < start.as_slice() {
-                continue;
-            }
+        if let Some(ref start) = start_bytes
+            && uk < start.as_slice()
+        {
+            continue;
         }
-        if let Some(ref end) = end_bytes {
-            if uk >= end.as_slice() {
-                continue;
-            }
+        if let Some(ref end) = end_bytes
+            && uk >= end.as_slice()
+        {
+            continue;
         }
 
         // Rebuild the InternalKey from wire bytes (user_key ++ tag).
@@ -360,16 +360,17 @@ pub fn range_scan(
         let level = Level(lvl);
         for file in version.files_at(level) {
             // Skip files whose key range doesn't overlap the scan range.
-            if let Some(ref start) = start_bytes {
-                if !file.meta.key_max.is_empty() && file.meta.key_max.as_slice() < start.as_slice()
-                {
-                    continue;
-                }
+            if let Some(ref start) = start_bytes
+                && !file.meta.key_max.is_empty()
+                && file.meta.key_max.as_slice() < start.as_slice()
+            {
+                continue;
             }
-            if let Some(ref end) = end_bytes {
-                if !file.meta.key_min.is_empty() && file.meta.key_min.as_slice() >= end.as_slice() {
-                    continue;
-                }
+            if let Some(ref end) = end_bytes
+                && !file.meta.key_min.is_empty()
+                && file.meta.key_min.as_slice() >= end.as_slice()
+            {
+                continue;
             }
 
             let (reader, dv) = open_file(base, file, engine.schema.clone())?;
@@ -399,10 +400,10 @@ pub fn range_scan(
 
     for (ikey, row, op) in harvest {
         let uk = ikey.user_key_bytes().to_vec();
-        if let Some(ref last) = last_uk {
-            if *last == uk {
-                continue; // older version of same key
-            }
+        if let Some(ref last) = last_uk
+            && *last == uk
+        {
+            continue; // older version of same key
         }
         last_uk = Some(uk);
 

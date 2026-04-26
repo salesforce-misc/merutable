@@ -558,27 +558,25 @@ impl MeruEngine {
         // see the same stale `should_flush=true` during a burst — serialize
         // rotation through `rotation_lock` and re-check under the lock so
         // only one task actually seals and spawns a flush.
-        if should_flush {
-            if let Ok(_guard) = self.rotation_lock.try_lock() {
-                // Stale should_flush from another task's apply_batch? If the
-                // active memtable was already rotated out from under us, the
-                // new active is small and we have nothing to do.
-                if self.memtable.active_should_flush() {
-                    let next_seq = self.global_seq.current().next();
-                    self.memtable.rotate(next_seq);
-                    // Rotate the WAL as well so the sealed memtable's
-                    // writes live in a closed log that GC can reclaim.
-                    {
-                        let mut wal = self.wal.lock().await;
-                        wal.rotate()?;
-                    }
-                    let engine = Arc::clone(self);
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::engine::flush::run_flush(&engine).await {
-                            tracing::error!(error = %e, "auto-flush failed");
-                        }
-                    });
+        if should_flush && let Ok(_guard) = self.rotation_lock.try_lock() {
+            // Stale should_flush from another task's apply_batch? If the
+            // active memtable was already rotated out from under us, the
+            // new active is small and we have nothing to do.
+            if self.memtable.active_should_flush() {
+                let next_seq = self.global_seq.current().next();
+                self.memtable.rotate(next_seq);
+                // Rotate the WAL as well so the sealed memtable's
+                // writes live in a closed log that GC can reclaim.
+                {
+                    let mut wal = self.wal.lock().await;
+                    wal.rotate()?;
                 }
+                let engine = Arc::clone(self);
+                tokio::spawn(async move {
+                    if let Err(e) = crate::engine::flush::run_flush(&engine).await {
+                        tracing::error!(error = %e, "auto-flush failed");
+                    }
+                });
             }
         }
 

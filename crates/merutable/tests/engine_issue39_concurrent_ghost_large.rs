@@ -177,10 +177,10 @@ async fn issue39_aggressive_stress_no_ghosts() {
                     sh.iter().take(50).map(|(k, v)| (k.clone(), *v)).collect()
                 };
                 for ((id, k2), present) in &samples {
-                    if let Ok(got) = e.get(&pk(*id, k2)) {
-                        if got.is_some() != *present {
-                            g.fetch_add(1, Ordering::Relaxed);
-                        }
+                    if let Ok(got) = e.get(&pk(*id, k2))
+                        && got.is_some() != *present
+                    {
+                        g.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 tokio::task::yield_now().await;
