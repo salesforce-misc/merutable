@@ -5,16 +5,26 @@
 
 ## Problem
 
-Range scans over upserting workloads currently force cross-level
-LSM merge to reconcile versions. That merge serializes the read
-pipeline and forces row materialization across L0..Ln, defeating
-columnar SIMD execution at L1+. Industry measurement on similar
-designs (Hyper, Photon, DuckDB lineage) puts the penalty at up to
-~100x vs. clean-Parquet baseline.
+Two related problems, one fix:
 
-The fix is positional deletion vectors — the same primitive Iceberg
-v3, Delta, and Hudi converged on. The question is **where in the
-write pipeline** to compute them.
+1. **External Iceberg readers see duplicate PKs.** A reader
+   (DuckDB, Spark, Trino, pyiceberg) scans every data file in the
+   snapshot. Without per-file deletion vectors, an upserted key's
+   prior versions all surface, and the reader has to apply an MVCC
+   dedup projection (`ROW_NUMBER() OVER (PARTITION BY pk ORDER BY
+   seq DESC) = 1` or equivalent — see `docs/EXTERNAL_READS.md`).
+   That projection is a leaky abstraction the Iceberg v3 spec was
+   designed to eliminate.
+2. **Range scans force cross-level LSM merge** to reconcile
+   versions, serializing the read pipeline and defeating columnar
+   SIMD at L1+. Industry measurement on similar designs (Hyper,
+   Photon, DuckDB lineage) puts the penalty at up to ~100x vs. a
+   clean-Parquet baseline.
+
+Both problems share one fix: positional deletion vectors — the same
+primitive Iceberg v3, Delta, and Hudi converged on — applied to
+**every** prior version of every upserted key, regardless of level.
+The question is **where in the write pipeline** to compute them.
 
 ## Non-negotiables
 
@@ -60,57 +70,79 @@ Steps 4–6 run inside `commit_lock`. Compaction cannot commit between
 step 4's pin and step 7's commit, so the `(file, position)`
 references stay valid through the commit.
 
-### `resolve_dv_target` shape
+### `resolve_dv_targets` shape
 
 ```rust
-fn resolve_dv_target(
+fn resolve_dv_targets(
     user_key: &[u8],
     version: &Version,
     base_path: &Path,
     schema: &Arc<TableSchema>,
-) -> Result<Option<(String, u64)>>
+) -> Result<Vec<(String, u64)>>
 ```
 
-For each level L1..Lmax, find the (at most one) covering file via the
-existing non-overlapping range index, then call a new
-`ParquetReader::position_of(user_key)` that walks the bloom + sparse
-index → page lookup → returns the file-global row position WITHOUT
-decoding the row. `get`'s existing logic already locates the row;
-the new method skips the value materialization. Returns the first
-hit by level (lowest level wins because L1+ are non-overlapping per
-level and a key cannot live in multiple L1+ files at the same
-sequence horizon).
+Probes **every level**, L0 and L1..Lmax, and returns **every** prior
+position of the user key across the dataset. A new
+`ParquetReader::position_of(user_key)` walks the bloom + sparse index →
+page → returns the file-global row position **without decoding the
+row** (the existing `get` does the same lookup but materializes the
+row).
 
-L0 is **deliberately not probed.** L0 files are the recent flushes
-themselves; an upsert of a key whose prior version is in L0 will be
-reconciled by future compaction merging the two L0 files. Probing L0
-during flush would create a self-referential dependency
-(this-flush's L0 vs. last-flush's L0) and add cost without changing
-the columnar-parallelism guarantee, which only matters at L1+.
+Why every level, not just L1+:
+
+> **Deletion vectors are how external Iceberg readers see one row
+> per primary key without an MVCC dedup projection.** An external
+> reader (DuckDB `iceberg_scan`, Spark, Trino, pyiceberg) opens
+> every data file in the snapshot, applies each file's DV bitmap,
+> and unions the surviving rows. If the prior L0 copy of an
+> upserted key is not DV-marked, the external reader sees
+> duplicates. The "scan parallelism for L1+" framing is a real
+> benefit but it is not the load-bearing reason — **PK uniqueness
+> for external readers is.** That guarantee requires DV-marking
+> every prior version regardless of level.
+
+L0 file count is bounded by the L0 backpressure thresholds
+(`l0_slowdown_trigger`, `l0_stop_trigger`); per-level for L1+ a key
+lives in at most one file (non-overlapping ranges per level), so
+the per-key probe cost is `O(F0 + num_levels)`, bounded by config.
+
+### Multiple prior versions of one key
+
+A key can have versions in multiple L0 files (sequence of flushes
+before any L0→L1 compaction) or across L0 and L1+ during transient
+states between compactions. The probe finds **all** of them and
+DV-marks each. Aggregation is per-file: the resolve pass produces a
+`HashMap<String, RoaringBitmap>` keyed by parquet file path; each
+position is unioned into the file's bitmap before being attached to
+the transaction.
+
+Idempotency falls out for free: if a probe re-discovers a position
+already in an existing DV blob (e.g. a fully-DV'd L1 file the bloom
+filter can't tell us about), the `catalog.commit()` path's existing
+DV merge (`union_with`) is a no-op. The optimization to short-circuit
+that case after the bloom hit but before the page read is a perf
+follow-on, not a correctness concern.
 
 ### What about the upsert→flush window?
 
-Between `db.put()` and the next flush, an upserted key's prior L1+
-version is **not yet** DV-marked. A concurrent range scan during
-that window sees both versions and pays the cross-level merge
-penalty for those rows.
+After flush commits, **external Iceberg readers see uniqueness
+immediately** — every prior version is DV-marked at every level. No
+MVCC projection required for the post-flush snapshot.
 
-This is **bounded**, not eliminated:
+Between `db.put()` and the next flush, the new value lives only in
+the memtable. An external reader sees the un-superseded prior
+version (no DV yet) and is unaware of the new value (memtable not
+exposed externally). This is the existing visibility model: external
+readers see the most recent committed snapshot. The RFC doesn't
+change that contract; it eliminates the duplicate-row problem within
+each committed snapshot.
 
-- L0 size is bounded by `memtable_size_mb × max_immutable_memtables`,
-  both configurable.
-- The merge penalty applies only to the keys that overlap between
-  L0/memtable and L1+. New-key inserts (the dominant upsert pattern
-  for many workloads) do not overlap.
-- For workloads where the window matters, the lever is "tune flush
-  thresholds tighter," **not** "couple the upsert path to file
-  layout."
-
-A transient in-memory scan-time bitmask (computed per scan from
-active memtable+L0 keys vs. L1+ file row positions) is a viable
-follow-on if measurement shows the window is a real bottleneck. It
-is **not** in this RFC's scope. We ship the flush-time path first,
-measure, then decide.
+For merutable's **internal** range scan during the window, the
+MergingIterator still reconciles memtable + L1+ rows for the keys
+in flight. Same bound as before: L0/memtable size is configurable;
+new-key inserts (the common case) don't overlap. A transient
+in-memory scan-time bitmask is a follow-on if measurement justifies
+it. **Not in this RFC's scope.**
 
 ## Invariants this preserves
 
@@ -138,24 +170,33 @@ I6. WAL recovery can replay against any post-crash physical state.
 | A5 | Probe latency unbounded under huge dataset                                    | Probe is O(memtable_keys × L1+_file_count) for bloom; O(memtable_keys × hits) for page reads. Bounded by configurable flush threshold + level fan-out. |
 | A6 | Crash mid-DV-write before manifest commit                                    | Existing `catalog.commit()` cleanup path (IMP-06) deletes orphaned puffin blobs on rollback. Already exercised by partial-compaction path. |
 | A7 | DV resolution decodes the row (wasted work)                                  | New `position_of` method skips row decode; bloom + sparse-index → page → InternalKey scan → return position only.                      |
-| A8 | Tombstone in memtable resolves a stale L1+ position                          | Tombstones go through the same resolve path. The DV emission handles tombstone-of-L1+-row correctly: L1+ position gets DV-marked, tombstone in L0 still drives compaction-time deletion of any L0-resident prior versions. |
-| A9 | Probing L0 creates a cycle                                                    | L0 explicitly skipped — see "What about the upsert→flush window?" above.                                                               |
+| A8 | Tombstone in memtable resolves a stale prior position                         | Tombstones go through the same resolve path. Both L0 and L1+ prior versions of the deleted key get DV-marked. The new L0 SST still carries the tombstone row for snapshot-pinned readers and for compaction-time tombstone reaping under snapshot-aware drop. |
+| A9 | Multiple prior versions of one key across L0/L1+                              | Probe returns all positions across all levels. Per-file aggregation in a `HashMap<path, RoaringBitmap>` ensures each prior copy is DV-marked. |
+| A10 | Existing fully-DV'd L1+ file gets re-probed every flush (wasted work)         | Correctness-safe (DV union is idempotent). Perf follow-on: skip the page-read step when the file's existing DV already covers the bloom-hit positions. Not in this RFC's scope. |
 
 ## Cost model
 
-For a flush of M memtable keys against a version with F L1+ files
-holding K total rows:
+For a flush of M memtable keys against a version with F0 L0 files
+plus F_n total L1+ files spanning N levels:
 
-- **Bloom probes:** `M × F`, ~50ns each. M=500K, F=50 → 25M ops ≈ 1.25s.
-  This is the worst case; bloom rejects most keys at <1ns amortized
-  with cache-hot bloom pages.
-- **Page reads on bloom hits:** ≈ `M × hit_rate × log2(K/page_size)`.
-  For 10% upsert hit rate, M=500K → 50K probes × ~10μs cache-warm
-  = 500ms.
+- **Bloom probes:** `M × (F0 + N)` worst case (binary search picks
+  one candidate file per L1+ level so the L1+ contribution is `M × N`,
+  not `M × F_n`). At 50ns each: M=500K, F0=20, N=4 → 12M ops ≈ 600ms.
+  Bloom rejects most keys at <1ns amortized with cache-hot pages.
+- **Page reads on bloom hits:** ≈ `M × upsert_rate × (F0_hit + L1+_hit)`.
+  For 10% upsert rate, M=500K → 50K probes × ~10μs cache-warm
+  ≈ 500ms (assuming cache warmth from concurrent compaction touching
+  the same files).
 - **Total flush latency increase:** ~1–5s for a 64 MiB memtable on
   realistic data, acceptable on a background flush.
 - **No write-path latency change.** The `db.put()` cost remains
   WAL fsync + memtable insert, unchanged.
+
+L0 file count is bounded by `l0_slowdown_trigger` /
+`l0_stop_trigger` (defaults: 8 / 12). N is bounded by total dataset
+size — `log_b(dataset_bytes / l0_size)` for level multiplier b.
+Both fan-outs are configurable; flush probe cost is bounded by
+configuration, not by adversarial inputs.
 
 If `enable_flush_dv_emission` is set false (config flag, defaults
 true), the entire resolve phase is skipped — for users who want
@@ -166,9 +207,13 @@ the pre-RFC behavior or who do not have upsert workloads.
 | Test                                                  | Bound                                                                                                                          |
 |-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
 | `put_latency_no_regression`                           | p99 latency post-RFC ≤ 1.10 × pre-RFC p99. Both measured under identical workload. Fails if write path was perturbed.          |
-| `flush_emits_dv_for_upserts`                          | Write N rows, force-flush, force-compact (so all are in L1+). Upsert all N. Force-flush. Asserts: L1 file's DV cardinality == N. **Equality**, not inequality. |
-| `flush_emits_no_dv_for_new_keys`                      | Write N entirely-new keys, force-flush. Asserts: zero DV blobs in committed snapshot. Tight.                                  |
-| `flush_emits_dv_for_tombstones`                       | Write N rows → flush → compact. Delete all N. Force-flush. Asserts: L1 file's DV cardinality == N. Tight.                     |
+| `flush_emits_dv_for_l1_priors`                        | Write N rows, force-flush, force-compact (so all are in L1+). Upsert all N. Force-flush. Asserts: L1 file's DV cardinality == N. **Equality**. |
+| `flush_emits_dv_for_l0_priors`                        | Write N rows, force-flush (rows in L0). Upsert all N. Force-flush. Asserts: prior L0 file's DV cardinality == N. **Equality**. This is the test the original RFC draft missed. |
+| `flush_emits_dv_for_multi_level_priors`               | Write N → flush → compact (in L1). Upsert N → flush (in L0_b). Upsert N again → flush. Asserts: L0_b's DV cardinality == N AND L1 file's DV cardinality == N. Tight. |
+| `external_iceberg_read_returns_unique_pks_post_flush` | Use the existing `iceberg-rs` round-trip path: write N → flush → compact → upsert N → flush → `db.export_iceberg(target)`. Have an external reader (or the Rust-side `iceberg-rs` reader) scan the table. Asserts: exactly N rows surfaced, every PK appears exactly once, every row is the upserted value. **No MVCC dedup projection applied.** This is the load-bearing acceptance test. |
+| `flush_emits_no_dv_for_new_keys`                      | Write N entirely-new keys, force-flush. Asserts: zero DV blobs in committed snapshot. Tight. |
+| `flush_emits_dv_for_tombstones`                       | Write N rows → flush → compact. Delete all N. Force-flush. Asserts: L1 file's DV cardinality == N. Tight. |
+| `flush_emits_dv_for_l0_tombstones`                    | Write N rows → flush (in L0). Delete all N. Force-flush. Asserts: prior L0 file's DV cardinality == N. Tight. |
 | `flush_resolves_against_pinned_version_under_compaction` | Concurrent compaction commits between flush start and flush commit. Asserts: flush's DV references the post-compaction file set, not stale (pre-compaction) paths. |
 | `scan_post_flush_no_duplicates_or_old_versions`       | Write N rows → flush → compact. Upsert all N. Flush. Range-scan. Asserts: exactly N rows, every value is the upserted value. Equality. |
 | `wal_format_unchanged`                                | Snapshot-test the WAL record bytes pre- and post-RFC. Asserts: byte-identical.                                                |
