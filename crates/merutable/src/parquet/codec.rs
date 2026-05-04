@@ -327,6 +327,45 @@ fn field_variant_name(v: &FieldValue) -> &'static str {
     }
 }
 
+/// Decode the `_merutable_ikey` column from a `RecordBatch` into a
+/// `Vec<InternalKey>`, **without** materializing per-column field
+/// values or the postcard blob.
+///
+/// Used by the flush-time deletion-vector resolve path
+/// (`ParquetReader::iter_user_keys_in_range`), where the consumer
+/// only needs `(user_key, file_position)` and pays nothing for the
+/// row payload it would discard. The batch must include
+/// `_merutable_ikey`; other columns are ignored.
+///
+/// The `_merutable_ikey` column is encoded as `BinaryArray` and is
+/// `not nullable` (asserted by the writer's `arrow_schema`), so a
+/// missing/null entry is corruption.
+pub fn record_batch_to_ikeys(
+    batch: &RecordBatch,
+    schema: &TableSchema,
+) -> Result<Vec<InternalKey>> {
+    let n = batch.num_rows();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let arrow_schema = batch.schema();
+    let ikey_idx = arrow_schema
+        .index_of(IKEY_COLUMN_NAME)
+        .map_err(|_| MeruError::Parquet(format!("missing {IKEY_COLUMN_NAME} column")))?;
+    let ikey_col = batch
+        .column(ikey_idx)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .ok_or_else(|| MeruError::Parquet(format!("{IKEY_COLUMN_NAME} not BinaryArray")))?;
+
+    let mut out = Vec::with_capacity(n);
+    for row_idx in 0..n {
+        let ikey_bytes = ikey_col.value(row_idx);
+        out.push(InternalKey::decode(ikey_bytes, schema)?);
+    }
+    Ok(out)
+}
+
 /// Convert an Arrow `RecordBatch` (from a Parquet read) back into
 /// `(InternalKey, Row)` pairs.
 ///
