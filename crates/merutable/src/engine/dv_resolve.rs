@@ -95,6 +95,19 @@ pub fn resolve_dv_for_flush(
             let lo = std::cmp::max(m_lo, f_min);
             let hi = std::cmp::min(m_hi, f_max);
 
+            // Issue #90: load the file's existing DV (if any) so we
+            // can short-circuit work that's already covered.
+            let existing_dv = load_existing_dv(file, base_path)?;
+
+            // Issue #90 fast-path: if the file is fully DV-marked
+            // already (existing.cardinality == num_rows), no flush
+            // can add a new position. Skip the page reads entirely.
+            if let Some(ref existing) = existing_dv {
+                if existing.len() == file.meta.num_rows {
+                    continue;
+                }
+            }
+
             // Read + open the file. The parquet crate's
             // SerializedFileReader needs a `ChunkReader` — we hold
             // the bytes and clone-by-Arc internally via `Bytes`.
@@ -137,7 +150,17 @@ pub fn resolve_dv_for_flush(
                             file.path
                         )));
                     }
-                    bitmap.insert(pos as u32);
+                    let pos_u32 = pos as u32;
+                    // Issue #90 per-position dedup: skip positions
+                    // already in the existing DV. The catalog merge
+                    // would no-op them anyway, but skipping here
+                    // avoids enlarging the in-flight bitmap and
+                    // (when ALL matches are covered) lets us drop
+                    // the file from the txn entirely below.
+                    if existing_dv.as_ref().is_some_and(|e| e.contains(pos_u32)) {
+                        continue;
+                    }
+                    bitmap.insert(pos_u32);
                     // Do NOT advance m_idx: a multi-version key
                     // yields multiple positions (same uk_f) and we
                     // must mark every one.
@@ -156,6 +179,49 @@ pub fn resolve_dv_for_flush(
         }
     }
     Ok(out)
+}
+
+/// Issue #90: load the on-disk DV for a file if its manifest entry
+/// has DV coords, returning the underlying `RoaringBitmap`. Returns
+/// `Ok(None)` when the file has no DV. Defensive: inconsistent
+/// coords (some Some, some None) are surfaced as `MeruError::Corruption`,
+/// matching the catalog/read-path validation contract.
+fn load_existing_dv(
+    file: &crate::iceberg::version::DataFileMeta,
+    base_path: &Path,
+) -> Result<Option<RoaringBitmap>> {
+    use crate::iceberg::DeletionVector;
+    match (&file.dv_path, file.dv_offset, file.dv_length) {
+        (Some(p), Some(o), Some(l)) => {
+            if o < 0 || l < 0 {
+                return Err(MeruError::Corruption(format!(
+                    "DV has negative offset ({o}) or length ({l}) on file {}",
+                    file.path
+                )));
+            }
+            let abs = base_path.join(p);
+            let bytes = std::fs::read(&abs).map_err(MeruError::Io)?;
+            let off = o as usize;
+            let len = l as usize;
+            let end = off
+                .checked_add(len)
+                .ok_or_else(|| MeruError::Corruption("DV offset+length overflow".into()))?;
+            if end > bytes.len() {
+                return Err(MeruError::Corruption(format!(
+                    "DV blob out of range on file {}: end={end} puffin_len={}",
+                    file.path,
+                    bytes.len()
+                )));
+            }
+            let dv = DeletionVector::from_puffin_blob(&bytes[off..end])?;
+            Ok(Some(dv.bitmap().clone()))
+        }
+        (None, None, None) => Ok(None),
+        _ => Err(MeruError::Corruption(format!(
+            "inconsistent DV coords on file {}: dv_path={:?} dv_offset={:?} dv_length={:?}",
+            file.path, file.dv_path, file.dv_offset, file.dv_length
+        ))),
+    }
 }
 
 /// Range overlap on user_key bytes. Empty key bounds (a freshly
@@ -509,6 +575,120 @@ mod tests {
         assert!(
             matches!(err, MeruError::Io(_)),
             "expected Io error, got {err:?}"
+        );
+    }
+
+    // ── Issue #90: existing-DV optimizations ────────────────────────────────
+
+    /// Helper: write a Puffin DV blob next to a parquet file and
+    /// stamp the (path, offset, length) coords back into the meta.
+    /// Mirrors what catalog::commit does on a real DV emission.
+    fn stamp_dv_on_file(base: &Path, meta: &mut DataFileMeta, positions: &[u32], snapshot_id: i64) {
+        use crate::iceberg::DeletionVector;
+        let mut dv = DeletionVector::new();
+        for &p in positions {
+            dv.mark_deleted(p);
+        }
+        let encoded = dv
+            .encode_puffin(&meta.path, snapshot_id, snapshot_id)
+            .unwrap();
+        let stem = std::path::Path::new(&meta.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap();
+        let parent = std::path::Path::new(&meta.path).parent().unwrap();
+        let rel = parent.join(format!("{stem}.dv-{snapshot_id}.puffin"));
+        let abs = base.join(&rel);
+        std::fs::write(&abs, &encoded.bytes).unwrap();
+        meta.dv_path = Some(rel.to_string_lossy().into_owned());
+        meta.dv_offset = Some(encoded.blob_offset);
+        meta.dv_length = Some(encoded.blob_length);
+    }
+
+    /// Files already FULLY DV-marked must be skipped: no page reads,
+    /// no entry in the result. The fast-path is hit when an existing
+    /// DV's cardinality equals the file's num_rows.
+    #[test]
+    fn fully_dv_marked_file_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let mut f = write_file(
+            tmp.path(),
+            "data/L1/a.parquet",
+            (0..10).map(|id| (id, id as u64 + 1)).collect(),
+            Level(1),
+        );
+        // Stamp a DV that covers ALL 10 positions.
+        let all: Vec<u32> = (0..10).collect();
+        stamp_dv_on_file(tmp.path(), &mut f, &all, 5);
+        let v = version_with_files(HashMap::from([(Level(1), vec![f])]));
+
+        // Memtable upserts every key — the resolver MUST return
+        // an empty map because the prior file is already fully marked.
+        let keys: Vec<Vec<u8>> = (0..10).map(user_key).collect();
+        let result = resolve_dv_for_flush(&keys, &v, tmp.path(), &Arc::new(test_schema())).unwrap();
+        assert!(
+            result.is_empty(),
+            "fully-marked file must produce no DV delta, got {result:?}"
+        );
+    }
+
+    /// Per-position dedup: positions already in the existing DV are
+    /// not re-added. The result bitmap holds ONLY the new positions.
+    #[test]
+    fn partial_dv_skips_already_covered_positions() {
+        let tmp = TempDir::new().unwrap();
+        let mut f = write_file(
+            tmp.path(),
+            "data/L1/a.parquet",
+            (0..10).map(|id| (id, id as u64 + 1)).collect(),
+            Level(1),
+        );
+        // Existing DV covers positions {0, 1, 2}; positions 3..10 are
+        // still live.
+        stamp_dv_on_file(tmp.path(), &mut f, &[0u32, 1, 2], 5);
+        let v = version_with_files(HashMap::from([(Level(1), vec![f])]));
+
+        // Memtable upserts ids 0..5 — positions 0,1,2 already
+        // covered, only 3,4 are new.
+        let keys: Vec<Vec<u8>> = (0..5).map(user_key).collect();
+        let result = resolve_dv_for_flush(&keys, &v, tmp.path(), &Arc::new(test_schema())).unwrap();
+        assert_eq!(result.len(), 1);
+        let bm = &result["data/L1/a.parquet"];
+        assert_eq!(
+            bm.len(),
+            2,
+            "only NEW positions (3, 4) should be in the delta, got cardinality {}",
+            bm.len()
+        );
+        assert!(bm.contains(3));
+        assert!(bm.contains(4));
+        assert!(
+            !bm.contains(0) && !bm.contains(1) && !bm.contains(2),
+            "covered positions must NOT be re-added"
+        );
+    }
+
+    /// If every match is already covered, the file must NOT appear
+    /// in the result map (else we'd emit a redundant DV update).
+    #[test]
+    fn all_matches_covered_excludes_file_from_result() {
+        let tmp = TempDir::new().unwrap();
+        let mut f = write_file(
+            tmp.path(),
+            "data/L1/a.parquet",
+            (0..10).map(|id| (id, id as u64 + 1)).collect(),
+            Level(1),
+        );
+        // Covers positions 0..5.
+        stamp_dv_on_file(tmp.path(), &mut f, &(0u32..5).collect::<Vec<_>>(), 5);
+        let v = version_with_files(HashMap::from([(Level(1), vec![f])]));
+
+        // Memtable upserts ids 0..5 — every match already covered.
+        let keys: Vec<Vec<u8>> = (0..5).map(user_key).collect();
+        let result = resolve_dv_for_flush(&keys, &v, tmp.path(), &Arc::new(test_schema())).unwrap();
+        assert!(
+            result.is_empty(),
+            "every match covered → no entry, got {result:?}"
         );
     }
 }
