@@ -19,4 +19,4 @@ pub mod write_path;
 
 pub use config::EngineConfig;
 pub use engine::MeruEngine;
-pub use stats::{CacheStats, EngineStats, FileStats, LevelStats, MemtableStats};
+pub use stats::{CacheStats, DvStats, EngineStats, FileStats, LevelStats, MemtableStats};

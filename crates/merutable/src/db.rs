@@ -1263,4 +1263,86 @@ mod tests {
         let card = sum_dv_cardinality(&db).await;
         assert_eq!(card, 0, "disjoint key range → no DV");
     }
+
+    // ── Issue #89: stats() surfaces DV coords ───────────────────────────────
+
+    /// Files with no DV report `dv: None`.
+    #[tokio::test]
+    async fn stats_reports_dv_none_when_file_has_no_dv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..20 {
+            db.put(make_row(i, "v0")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        let stats = db.stats();
+        let files: Vec<_> = stats.levels.iter().flat_map(|l| l.files.iter()).collect();
+        assert!(!files.is_empty(), "post-flush snapshot has files");
+        for f in &files {
+            assert!(!f.has_dv, "fresh L0 file has no DV");
+            assert!(
+                f.dv.is_none(),
+                "has_dv=false MUST imply dv=None for {}",
+                f.path
+            );
+        }
+    }
+
+    /// Files with a DV report a populated `dv` whose path/offset/length
+    /// match a real puffin file on disk.
+    #[tokio::test]
+    async fn stats_reports_dv_coords_for_dv_bearing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..30 {
+            db.put(make_row(i, "v0")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        for i in 0..30 {
+            db.put(make_row(i, "v1")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let stats = db.stats();
+        let dv_files: Vec<_> = stats
+            .levels
+            .iter()
+            .flat_map(|l| l.files.iter())
+            .filter(|f| f.has_dv)
+            .collect();
+        assert!(
+            !dv_files.is_empty(),
+            "must have at least one DV-bearing file"
+        );
+
+        let base = std::path::PathBuf::from(db.catalog_path());
+        for f in &dv_files {
+            let dv = f.dv.as_ref().expect("has_dv=true MUST imply dv=Some");
+            // The puffin file referenced by dv.path exists on disk.
+            let abs = base.join(&dv.path);
+            let metadata = std::fs::metadata(&abs)
+                .unwrap_or_else(|e| panic!("puffin file {} should exist: {e}", abs.display()));
+            // dv.offset + dv.length is within the file.
+            let total = metadata.len() as i64;
+            let end = dv.offset + dv.length;
+            assert!(
+                dv.offset >= 0 && dv.length > 0 && end <= total,
+                "dv coords ({}, {}) out of range for {} (size={})",
+                dv.offset,
+                dv.length,
+                dv.path,
+                total
+            );
+            // The blob at those coords parses as a valid DV.
+            let bytes = std::fs::read(&abs).unwrap();
+            let off = dv.offset as usize;
+            let len = dv.length as usize;
+            crate::iceberg::DeletionVector::from_puffin_blob(&bytes[off..off + len])
+                .expect("blob at dv coords must parse");
+        }
+    }
 }
