@@ -70,23 +70,63 @@ Steps 4–6 run inside `commit_lock`. Compaction cannot commit between
 step 4's pin and step 7's commit, so the `(file, position)`
 references stay valid through the commit.
 
-### `resolve_dv_targets` shape
+### Algorithm: range merge-intersection, not per-key probe
 
-```rust
-fn resolve_dv_targets(
-    user_key: &[u8],
-    version: &Version,
-    base_path: &Path,
-    schema: &Arc<TableSchema>,
-) -> Result<Vec<(String, u64)>>
+Naive per-key probing — for each of M memtable keys, bloom-check
+and sparse-index-search every prior file — is `O(M × F)` work and
+wastes the structure both sides already have. Both the memtable
+**and** every parquet file are **sorted by user_key**. The right
+algorithm is a single sorted-merge per file:
+
+```
+for each prior file F in version (L0 + L1+):
+    if not ranges_overlap(F.key_range, memtable.key_range):
+        continue                                       # cheap skip
+    f_iter = F.iter_keys_in_range(memtable.min, memtable.max)
+    m_iter = memtable.user_keys_in_range(F.key_min, F.key_max)
+    while m_iter and f_iter:
+        cmp = m_iter.peek().cmp(f_iter.peek().user_key)
+        match cmp:
+            Equal:   dv[F.path].insert(f_iter.peek().position)
+                     advance f_iter            # may have more versions
+            Less:    advance m_iter
+            Greater: advance f_iter
 ```
 
-Probes **every level**, L0 and L1..Lmax, and returns **every** prior
-position of the user key across the dataset. A new
-`ParquetReader::position_of(user_key)` walks the bloom + sparse index →
-page → returns the file-global row position **without decoding the
-row** (the existing `get` does the same lookup but materializes the
-row).
+Per file: `O(|f_overlap_pages| + |m_overlap_keys|)` — both linear
+in the overlap, no bloom check, no per-key binary search.
+
+The **range hint** to the reader (`memtable.min`, `memtable.max`)
+lets the file skip pages outside the overlap window using its
+existing `KvSparseIndex`. A file whose entire range is disjoint
+from the memtable does zero page I/O — bailed out by the
+`ranges_overlap` check.
+
+A user_key with N versions in F (multi-version row) yields N
+positions to DV-mark — the file iterator yields every InternalKey
+occurrence (user_key ASC, seq DESC), and we mark every position
+that user_key appears at. Correct without special handling.
+
+### Phase 1 deliverable: streaming key+position API on the reader
+
+```rust
+impl ParquetReader {
+    /// Yield `(user_key_bytes, file_global_row_position)` in sorted
+    /// `(user_key ASC, seq DESC)` order for every InternalKey whose
+    /// user_key falls within `[lo, hi]` (inclusive). Uses the
+    /// sparse index to skip pages outside the range. Multi-version
+    /// rows yield one tuple per version. Does NOT decode the row.
+    pub fn iter_user_keys_in_range<'a>(
+        &'a self,
+        lo: &[u8],
+        hi: &[u8],
+    ) -> Result<impl Iterator<Item = Result<(Vec<u8>, u64)>> + 'a>;
+}
+```
+
+This is the only new reader API. It composes naturally with the
+merge-intersection above. There is no per-key `position_of` —
+that approach was discarded.
 
 Why every level, not just L1+:
 
@@ -103,8 +143,9 @@ Why every level, not just L1+:
 
 L0 file count is bounded by the L0 backpressure thresholds
 (`l0_slowdown_trigger`, `l0_stop_trigger`); per-level for L1+ a key
-lives in at most one file (non-overlapping ranges per level), so
-the per-key probe cost is `O(F0 + num_levels)`, bounded by config.
+lives in at most one file (non-overlapping ranges per level). The
+range merge-intersection (next subsection) traverses each
+overlapping prior file once, not once per memtable key.
 
 ### Multiple prior versions of one key
 
@@ -169,7 +210,7 @@ I6. WAL recovery can replay against any post-crash physical state.
 | A4 | Memtable holds (file, position) state                                         | Memtable interface unchanged. Tests in `memtable/` unchanged. Reviewer-enforced.                                                       |
 | A5 | Probe latency unbounded under huge dataset                                    | Probe is O(memtable_keys × L1+_file_count) for bloom; O(memtable_keys × hits) for page reads. Bounded by configurable flush threshold + level fan-out. |
 | A6 | Crash mid-DV-write before manifest commit                                    | Existing `catalog.commit()` cleanup path (IMP-06) deletes orphaned puffin blobs on rollback. Already exercised by partial-compaction path. |
-| A7 | DV resolution decodes the row (wasted work)                                  | New `position_of` method skips row decode; bloom + sparse-index → page → InternalKey scan → return position only.                      |
+| A7 | DV resolution decodes the row (wasted work)                                  | New `iter_user_keys_in_range` streams `(user_key, position)` only — no row decode. Sparse index restricts reads to overlapping pages.   |
 | A8 | Tombstone in memtable resolves a stale prior position                         | Tombstones go through the same resolve path. Both L0 and L1+ prior versions of the deleted key get DV-marked. The new L0 SST still carries the tombstone row for snapshot-pinned readers and for compaction-time tombstone reaping under snapshot-aware drop. |
 | A9 | Multiple prior versions of one key across L0/L1+                              | Probe returns all positions across all levels. Per-file aggregation in a `HashMap<path, RoaringBitmap>` ensures each prior copy is DV-marked. |
 | A10 | Existing fully-DV'd L1+ file gets re-probed every flush (wasted work)         | Correctness-safe (DV union is idempotent). Perf follow-on: skip the page-read step when the file's existing DV already covers the bloom-hit positions. Not in this RFC's scope. |
@@ -179,16 +220,20 @@ I6. WAL recovery can replay against any post-crash physical state.
 For a flush of M memtable keys against a version with F0 L0 files
 plus F_n total L1+ files spanning N levels:
 
-- **Bloom probes:** `M × (F0 + N)` worst case (binary search picks
-  one candidate file per L1+ level so the L1+ contribution is `M × N`,
-  not `M × F_n`). At 50ns each: M=500K, F0=20, N=4 → 12M ops ≈ 600ms.
-  Bloom rejects most keys at <1ns amortized with cache-hot pages.
-- **Page reads on bloom hits:** ≈ `M × upsert_rate × (F0_hit + L1+_hit)`.
-  For 10% upsert rate, M=500K → 50K probes × ~10μs cache-warm
-  ≈ 500ms (assuming cache warmth from concurrent compaction touching
-  the same files).
-- **Total flush latency increase:** ~1–5s for a 64 MiB memtable on
-  realistic data, acceptable on a background flush.
+- **Range-overlap filter:** O(F0 + F_n) cheap range-pair comparisons.
+  Sub-millisecond at any reasonable file count.
+- **Per-overlapping-file merge:** O(|f_overlap_pages| + |m_overlap_keys|).
+  For a memtable that fully overlaps an L1+ file: a streaming page
+  scan + memtable iterator walk. Page reads are sequential, so the
+  parquet metadata cache + OS page cache amortize them.
+- **No per-key bloom probe and no per-key sparse-index search.**
+  The merge-intersection eliminates both — they were the dominant
+  cost in the per-key-probe alternative.
+- **Total flush latency increase:** dominated by the additional
+  page reads of overlapping prior files. For a 64 MiB memtable
+  spanning 1 L0 file (64 MiB) and 1 L1 file (64 MiB) with full
+  overlap: ~128 MiB additional sequential read ≈ 100–500ms on SSD.
+  Cache-warm: tens of ms.
 - **No write-path latency change.** The `db.put()` cost remains
   WAL fsync + memtable insert, unchanged.
 
@@ -225,20 +270,37 @@ the pre-RFC behavior or who do not have upsert workloads.
 
 Each phase is independently reviewable and lands as its own PR.
 
-**Phase 1 — `ParquetReader::position_of`** (no behavior change yet)
+**Phase 1 — `ParquetReader::iter_user_keys_in_range`** (no behavior change yet)
 
-- New method on the existing reader. Same probe path as `get`, returns
-  position only.
-- Unit tests: position consistency vs. `get`'s implicit position;
-  None for absent keys; correct under multi-version files.
+- New streaming method on the existing reader.
+- Walks the sparse index, streams `(user_key_bytes, position)` pairs
+  in `(user_key ASC, seq DESC)` order across only the pages that
+  overlap `[lo, hi]`.
+- Multi-version rows yield one tuple per occurrence.
+- Unit tests:
+  - Empty range → empty iterator.
+  - Range disjoint from file range → empty iterator, **zero page reads**
+    (asserted via a counting wrapper).
+  - Range fully containing file → every (user_key, position) yielded
+    exactly once.
+  - Multi-version file: every version yields its own position.
+  - Iterator is **lazy**: opening + dropping the iterator without
+    pulling does not read any data pages.
 
 **Phase 2 — `engine::dv_resolve` module** (helper, no integration yet)
 
-- `resolve_dv_target(user_key, version, base_path, schema)`.
+- `resolve_dv_for_flush(memtable_keys: &[InternalKey], version: &Version, base_path: &Path, schema: &Arc<TableSchema>) -> Result<HashMap<String, RoaringBitmap>>`.
 - Pure function over `&Version`. Unit-testable with synthetic versions.
-- Tests: hits L1+ correctly, returns None for new keys, skips L0,
-  picks lowest L when present in multiple levels (which shouldn't
-  happen in practice but the test pins the contract).
+- For each prior file: range-overlap filter, then sorted merge against
+  memtable keys, accumulating positions into the per-file bitmap.
+- Tests:
+  - Memtable keys disjoint from every file range → returns empty map.
+  - Memtable keys fully overlap one L1 file → bitmap matches expected
+    positions exactly (cardinality equality).
+  - Multi-version L0 file: all versions of an upserted key DV-marked.
+  - Mix of L0 + L1 priors for the same key: both files' bitmaps populated.
+  - Tombstone in memtable: same resolution as upsert (the resolve API
+    operates on user_keys, not op_types).
 
 **Phase 3 — wire into `flush.rs` behind a feature flag**
 
