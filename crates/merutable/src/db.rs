@@ -154,6 +154,7 @@ impl MeruDB {
             gc_grace_period_secs: options.gc_grace_period_secs,
             read_only: options.read_only,
             dual_format_max_level: options.dual_format_max_level,
+            enable_flush_dv_emission: options.enable_flush_dv_emission,
         };
 
         let engine = MeruEngine::open(config).await?;
@@ -1038,5 +1039,228 @@ mod tests {
         // Scan must still work.
         let results = db.scan(None, None).unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    // ── RFC-0002 Phase 3: flush-time DV emission integration tests ──────────
+
+    /// Helper: count files with a non-null `dv_path` across every level.
+    fn count_files_with_dv(stats: &crate::engine::EngineStats) -> usize {
+        stats
+            .levels
+            .iter()
+            .flat_map(|l| l.files.iter())
+            .filter(|f| f.has_dv)
+            .count()
+    }
+
+    /// Total DV cardinality across every file in the snapshot. Reads
+    /// the manifest entries via stats() and sums the on-disk Puffin
+    /// blob row counts. Cheap because each blob's cardinality is
+    /// surfaced in the manifest entry — but stats doesn't expose
+    /// that directly, so we re-open the underlying DV blobs.
+    async fn sum_dv_cardinality(db: &MeruDB) -> u64 {
+        let snap = db.engine_for_replica().version_set.current().clone();
+        let base = db.engine_for_replica().catalog.base_path().to_path_buf();
+        let mut total: u64 = 0;
+        for level in 0..=snap.max_level().0 {
+            let lvl = crate::types::level::Level(level);
+            for file in snap.files_at(lvl) {
+                if let (Some(dv_path), Some(off), Some(len)) =
+                    (&file.dv_path, file.dv_offset, file.dv_length)
+                {
+                    let abs = base.join(dv_path);
+                    let bytes = tokio::fs::read(&abs).await.unwrap();
+                    let off = off as usize;
+                    let len = len as usize;
+                    let dv =
+                        crate::iceberg::DeletionVector::from_puffin_blob(&bytes[off..off + len])
+                            .unwrap();
+                    total += dv.cardinality();
+                }
+            }
+        }
+        total
+    }
+
+    /// First flush after fresh-key inserts must emit ZERO DV blobs.
+    /// No prior versions exist anywhere in the dataset.
+    #[tokio::test]
+    async fn flush_first_writes_no_dv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..50 {
+            db.put(make_row(i, &format!("v{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let stats = db.stats();
+        assert_eq!(count_files_with_dv(&stats), 0, "no priors → no DVs");
+    }
+
+    /// Second flush over upserted-into-L0 keys must DV-mark every
+    /// position in the prior L0 file. RFC-0002 load-bearing: L0
+    /// priors are external-PK-uniqueness critical.
+    #[tokio::test]
+    async fn flush_emits_dv_for_l0_priors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        // Round 1: 30 fresh keys → flushed to L0 (file A).
+        for i in 0..30 {
+            db.put(make_row(i, &format!("v0_{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        let after_first = sum_dv_cardinality(&db).await;
+        assert_eq!(after_first, 0);
+
+        // Round 2: upsert all 30 keys → flushed to L0 (file B).
+        // The flush must DV-mark every position in file A.
+        for i in 0..30 {
+            db.put(make_row(i, &format!("v1_{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let after_second = sum_dv_cardinality(&db).await;
+        assert_eq!(
+            after_second, 30,
+            "every L0 prior position must be DV-marked"
+        );
+    }
+
+    /// Tombstones (db.delete) follow the same resolve path as upserts
+    /// — RFC-0002 anti-fix A8.
+    #[tokio::test]
+    async fn flush_emits_dv_for_l0_tombstones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..20 {
+            db.put(make_row(i, "live")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        for i in 0..20 {
+            db.delete(vec![FieldValue::Int64(i)]).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        let card = sum_dv_cardinality(&db).await;
+        assert_eq!(
+            card, 20,
+            "every L0 prior must be DV-marked by tombstone flush"
+        );
+
+        // Reads must continue to honor MVCC dedup — every key gone.
+        for i in 0..20 {
+            assert!(db.get(&[FieldValue::Int64(i)]).unwrap().is_none());
+        }
+    }
+
+    /// `enable_flush_dv_emission(false)` must skip the resolve+emit
+    /// step entirely, and produce a snapshot identical to pre-RFC
+    /// behavior. Sanity check: no DV blobs after upsert+flush.
+    #[tokio::test]
+    async fn flush_dv_emission_disabled_emits_no_dv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(
+            test_options(&tmp)
+                .memtable_size_mb(1)
+                .enable_flush_dv_emission(false),
+        )
+        .await
+        .unwrap();
+        for i in 0..30 {
+            db.put(make_row(i, &format!("v0_{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        for i in 0..30 {
+            db.put(make_row(i, &format!("v1_{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        assert_eq!(
+            count_files_with_dv(&db.stats()),
+            0,
+            "feature off → zero DV blobs even on upsert"
+        );
+    }
+
+    /// Reads against an upserted dataset must see the latest value
+    /// for every key. The DV emission is invisible to internal
+    /// readers — they go through MergingIterator regardless — but a
+    /// regression here would catch any mistake that DV-marks the
+    /// WRONG positions.
+    #[tokio::test]
+    async fn flush_dv_does_not_corrupt_internal_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..40 {
+            db.put(make_row(i, &format!("v0_{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        for i in 0..40 {
+            db.put(make_row(i, &format!("v1_{i}"))).await.unwrap();
+        }
+        db.flush().await.unwrap();
+
+        for i in 0..40 {
+            let row = db.get(&[FieldValue::Int64(i)]).unwrap().unwrap();
+            let val = row.get(1).unwrap();
+            assert_eq!(
+                *val,
+                FieldValue::Bytes(Bytes::from(format!("v1_{i}"))),
+                "key {i} must read the v1 value"
+            );
+        }
+        // Range scan: exactly 40 rows, all v1.
+        let scan = db.scan(None, None).unwrap();
+        assert_eq!(scan.len(), 40);
+    }
+
+    /// Upsert-only of a SUBSET: priors for the subset get DV-marked,
+    /// untouched priors stay live. Tight cardinality.
+    #[tokio::test]
+    async fn flush_emits_dv_for_upsert_subset_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..50 {
+            db.put(make_row(i, "v0")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        // Upsert only ids 10..30 (20 keys).
+        for i in 10..30 {
+            db.put(make_row(i, "v1")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        let card = sum_dv_cardinality(&db).await;
+        assert_eq!(card, 20, "exactly the upserted subset must be DV-marked");
+    }
+
+    /// New-key flushes (no overlap with existing files) must NOT
+    /// emit any DV. Catches a regression where the resolver
+    /// accidentally marks unrelated positions.
+    #[tokio::test]
+    async fn flush_new_key_range_emits_no_dv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        for i in 0..30 {
+            db.put(make_row(i, "v0")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        // Flush 2: entirely new keys, disjoint range.
+        for i in 1000..1030 {
+            db.put(make_row(i, "v1")).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        let card = sum_dv_cardinality(&db).await;
+        assert_eq!(card, 0, "disjoint key range → no DV");
     }
 }
