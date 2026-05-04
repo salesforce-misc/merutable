@@ -318,19 +318,27 @@ Each phase is independently reviewable and lands as its own PR.
     mid-bench.
   - `flush_overhead/{dv_off, dv_on}` — flush wall time of 1K upserts
     against an L1 file holding 1K priors.
-- Range-scan-throughput bench is a follow-on (deferred to a separate
-  bench module that owns the clean-Parquet baseline construction).
+- Range-scan-throughput bench landed in issue #91; numbers below.
 
 ### Measured (macOS, criterion --quick)
 
-| Metric | DV off | DV on | Δ |
+| Metric | Value | Comparator | Δ |
 |---|---|---|---|
-| `put` mean | 3.88 ms | 3.68 ms | within noise (dv-on slightly faster; dominated by per-put fsync) |
-| 1K-upsert flush | 26.9 ms | 31.8 ms | +4.9 ms (+18%) |
+| `put` mean (dv_off) | 3.88 ms | — | — |
+| `put` mean (dv_on) | 3.68 ms | dv_off | within noise |
+| 1K-upsert flush (dv_off) | 26.9 ms | — | — |
+| 1K-upsert flush (dv_on) | 31.8 ms | dv_off | +4.9 ms (+18%) |
+| 5K range-scan (clean) | 4.27 ms / 1.17 M elem/s | — | — |
+| 5K range-scan (post-upsert) | 6.75 ms / 0.74 M elem/s | clean | **0.63× throughput (1.58× slower)** — within the 2× bound |
 
 **The load-bearing contract holds:** dv_on ≈ dv_off on `put`. The
 +18% on flush is the amortized resolve+puffin-write cost paid at the
 flush boundary, not at the upsert. Per-row marginal: ~5 μs.
+
+**Range-scan post-flush stays within constant factor of clean.** The
+1.58× slowdown is the cost of opening DV blobs alongside data files
+and applying the bitmap during the merge — bounded, predictable,
+inside the 2× bar.
 
 **Phase 5 — docs**
 
