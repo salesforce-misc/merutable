@@ -31,7 +31,21 @@ jobs:
           sudo apt-get install -y protobuf-compiler
 
       - name: Cache Cargo registry
+        # actions/cache@v4 occasionally hangs indefinitely on cache
+        # restore against the current backend (observed on PR #83 —
+        # two consecutive runs sat in_progress for >30 min on this
+        # step). A hang takes the whole job down and prevents later
+        # steps from running. Mitigate:
+        #   - timeout-minutes: 5  → kill the step if it stalls.
+        #   - continue-on-error: true → a missed cache means slower
+        #     compile, NOT a CI failure. Correctness gates downstream
+        #     (fmt/clippy/test) still run and decide the job result.
+        # Cache Cargo registry stays best-effort; the bench job (which
+        # doesn't use the cache) succeeds reliably, proving the rest
+        # of the pipeline is fine.
         uses: actions/cache@v4
+        timeout-minutes: 5
+        continue-on-error: true
         with:
           path: |
             ~/.cargo/registry
