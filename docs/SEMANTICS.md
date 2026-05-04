@@ -5,41 +5,58 @@ This file exists to ground ambiguous README wording against the code
 that actually runs in production. When the README and this file
 disagree, this file wins and the README is wrong.
 
-## Deletion Vectors: honored on read, not emitted
+## Deletion Vectors: emitted at flush, honored on read
 
-merutable's own deletes are tombstone rows written through the normal
-LSM write path (`db.delete(pk)` → `write_internal(.., OpType::Delete)`);
-compaction reconciles them. No part of merutable's commit pipeline
-produces a Puffin `deletion-vector-v1` blob.
+As of 0.0.2 (RFC-0002, issue #73), every flush emits per-file
+deletion vectors that DV-mark every prior version of every
+upserted/deleted memtable key, across L0 + L1+ alike. The flush
+job, the manifest commit, and the puffin file write are one
+atomic unit (same `commit_lock`-serialized chain that compaction
+already used for partial-compaction DVs).
 
-What merutable *does* do is honor DVs if it encounters them. On every
-compaction merge and every read path, each input file is opened with
-its associated DV (if the manifest entry has a `dv_path`) and the
-marked row positions are filtered out before the merge iterator sees
-them. Implementation:
-`crates/merutable/src/engine/compaction/job.rs:open_source_file`,
-`crates/merutable/src/engine/read_path.rs`.
+This is the contract that gives external Iceberg readers
+(DuckDB `iceberg_scan`, Spark, Trino, pyiceberg) **one row per
+primary key without an MVCC dedup projection**. Removing the
+flush-side emission would re-introduce the duplicate-rows-per-PK
+leak `docs/EXTERNAL_READS.md` describes for pre-0.0.2 snapshots.
 
-This matters for Apache Iceberg v3 interop. An external writer
-(Spark, pyiceberg, Trino) can stamp a DV on a merutable-owned data
-file, and merutable will honor it on the next merge that touches the
-file. Removing the read-side would break v3 compatibility.
+Implementation:
+- Read path opens each file alongside its DV
+  (`crates/merutable/src/engine/read_path.rs`).
+- Compaction honors input DVs and rewrites without DV-marked rows
+  (`crates/merutable/src/engine/compaction/job.rs:open_source_file`).
+- Flush computes per-file DV deltas via range merge-intersection
+  (`crates/merutable/src/engine/dv_resolve.rs`), runs under
+  `commit_lock` against a pinned version snapshot, and stamps the
+  Puffin blobs into the same manifest commit as the new L0 SST
+  (`crates/merutable/src/engine/flush.rs`).
 
-The Puffin v3 `deletion-vector-v1` encoder in
-`crates/merutable/src/iceberg/deletion_vector.rs` and the
-`SnapshotTransaction::add_dv` API exist so that external tooling or
-future library-level commit flows can construct DV-stamped commits
-against a merutable catalog. The engine itself does not call them.
+`db.delete(pk)` still writes a logical tombstone row through the
+normal LSM write path (`OpType::Delete`); the flush emits the DV
+for the prior version's position, **and** keeps the L0 tombstone
+row so snapshot-pinned older readers and future compactions both
+see consistent state.
+
+External writers (Spark, pyiceberg, Trino) can also stamp v3 DVs on
+merutable-owned data files; merutable honors them uniformly on the
+read path and the next compaction.
+
+`OpenOptions::enable_flush_dv_emission(false)` opts out for
+workloads with no upserts where the resolve+emit cost is pure
+overhead. Default ON.
 
 ## MVCC semantics seen by external readers
 
-Short version: an external reader sees the *union* of every live
-Parquet file — which includes cross-level duplicates and tombstones.
-An `ORDER BY seq DESC, LIMIT 1` (or `ROW_NUMBER() QUALIFY …`)
-projection is required to recover the `MeruDB::get`/`scan`-equivalent
-view. Full treatment is in [docs/EXTERNAL_READS.md](EXTERNAL_READS.md) once
-that file lands; until then see the `IcebergCatalog::commit` and
-`read_path` modules.
+Post-0.0.2 the dedup projection is **no longer required** for
+snapshots produced by merutable's own flushes — flush-emitted DVs
+guarantee one row per PK per snapshot. The projection's only
+remaining role is back-compat with snapshots written by
+pre-0.0.2 merutable (or by callers running with
+`enable_flush_dv_emission(false)`). See
+[docs/EXTERNAL_READS.md](EXTERNAL_READS.md) for the legacy
+projection; new external integrations against 0.0.2+ snapshots
+should read the data files directly with each file's DV applied
+and skip the projection.
 
 ## Full-rewrite invariants
 
