@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.0.2 — 2026-05-03
+
+RFC-0002: flush-time deletion vector emission. Brings external
+Iceberg readers (DuckDB `iceberg_scan`, Spark, Trino, pyiceberg)
+to one-row-per-PK without an MVCC dedup projection.
+
+### Highlights
+
+- **Flush-time deletion vectors.** Every committed snapshot now
+  DV-marks every prior version of every upserted/deleted memtable
+  key, across L0 + L1+ alike, atomically with the L0 SST and the
+  manifest commit. External Iceberg readers see exactly one row
+  per primary key — no `ROW_NUMBER() OVER PARTITION BY pk` dedup
+  required.
+- **Write path unchanged.** `db.put()` does no file I/O. The
+  resolve+emit work piggybacks on the flush job's existing
+  memtable iteration. Measured: put latency unchanged; flush
+  overhead +18% for a 1K-upsert workload (resolve + Puffin + manifest).
+- **Range merge-intersection.** The resolver does a single sorted-
+  merge per overlapping prior file — `O(|f_overlap| + |m_overlap|)`
+  per file — not a per-key bloom+sparse-index probe. Files outside
+  the memtable range are skipped without I/O.
+- **Configurable.** `OpenOptions::enable_flush_dv_emission(false)`
+  opts out for workloads with no upserts. Default ON.
+- New public reader API: `ParquetReader::iter_user_keys_in_range(lo, hi)`
+  streams `(user_key, file-global position)` without decoding the
+  row payload.
+- New engine module: `engine::dv_resolve::resolve_dv_for_flush` —
+  pure helper unit-testable in isolation.
+
+### Tests
+
+- 11 unit tests for `dv_resolve` (every-level probe, multi-version,
+  partial overlap, missing file, etc.).
+- 8 reader unit tests for `iter_user_keys_in_range` (lazy
+  construction, zero-I/O on disjoint range, multi-version yield).
+- 8 integration tests in `db::tests` for the wired flush path
+  (cardinality equality, tombstone DV-marking, feature-off,
+  internal-read correctness, subset upserts, disjoint ranges).
+- 6 stress + chaos tests in `tests/stress_flush_dv.rs` (2500-write
+  upsert sweep with cardinality equality, interleaved upsert/delete
+  oracle, 4-writer concurrent chaos with flush/compact/scan,
+  compaction-during-flush race, 10K-cardinality per-file DV bitmap,
+  close+reopen DV durability).
+
+### References
+
+- RFC: `docs/rfc/0002-flush-time-deletion-vectors.md`
+- Issue: #73
+
 ## 0.0.1 — 2026-04-22
 
 Initial public release of the `merutable` crate.
