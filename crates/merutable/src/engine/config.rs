@@ -90,6 +90,20 @@ pub struct EngineConfig {
     /// Existing files retain their write-time format (stamped in
     /// `ParquetFileMeta::format`).
     pub dual_format_max_level: Option<u8>,
+
+    /// RFC-0002: emit per-file deletion vectors at flush time so
+    /// every prior version of each upserted/deleted memtable key is
+    /// DV-marked in the same atomic snapshot commit. Required for
+    /// external Iceberg readers (DuckDB `iceberg_scan`, Spark, Trino,
+    /// pyiceberg) to see one row per primary key without an MVCC
+    /// dedup projection.
+    ///
+    /// Default: `true`. Set `false` to skip the resolve+emit step
+    /// (e.g. workloads with no upserts where the cost is pure
+    /// overhead, or operators benchmarking the legacy behavior).
+    /// Disabling does NOT affect compaction-emitted DVs (Iceberg v3
+    /// interop with externally-stamped DVs continues to work).
+    pub enable_flush_dv_emission: bool,
 }
 
 impl EngineConfig {
@@ -137,6 +151,9 @@ impl Default for EngineConfig {
             gc_grace_period_secs: 300,
             // Default matches the pre-Issue-#15 hard-coded behavior.
             dual_format_max_level: Some(0),
+            // RFC-0002: on by default — external Iceberg PK
+            // uniqueness is the load-bearing reason DVs exist.
+            enable_flush_dv_emission: true,
         }
     }
 }

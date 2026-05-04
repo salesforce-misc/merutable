@@ -140,6 +140,13 @@ pub struct OpenOptions {
     /// Issue #31: optional async mirror to an object-store target.
     /// See [`MirrorConfig`].
     pub mirror: Option<MirrorConfig>,
+
+    /// RFC-0002: emit per-file deletion vectors at flush time so
+    /// every prior version of each upserted/deleted memtable key is
+    /// DV-marked. Required for external Iceberg readers to see one
+    /// row per primary key without an MVCC dedup projection.
+    /// Default: `true`.
+    pub enable_flush_dv_emission: bool,
 }
 
 impl OpenOptions {
@@ -172,6 +179,7 @@ impl OpenOptions {
             read_only: ec.read_only,
             dual_format_max_level: ec.dual_format_max_level,
             mirror: None,
+            enable_flush_dv_emission: ec.enable_flush_dv_emission,
         }
     }
 
@@ -188,6 +196,14 @@ impl OpenOptions {
     /// level columnar-only for OLAP / append-only.
     pub fn dual_format_max_level(mut self, max: Option<u8>) -> Self {
         self.dual_format_max_level = max;
+        self
+    }
+
+    /// RFC-0002: toggle flush-time deletion-vector emission. Default
+    /// is `true`; set `false` to skip the resolve+emit step (e.g. for
+    /// workloads with no upserts where the cost is pure overhead).
+    pub fn enable_flush_dv_emission(mut self, on: bool) -> Self {
+        self.enable_flush_dv_emission = on;
         self
     }
 

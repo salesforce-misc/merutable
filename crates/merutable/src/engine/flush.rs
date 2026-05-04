@@ -237,6 +237,28 @@ pub async fn run_flush(engine: &Arc<MeruEngine>) -> Result<()> {
     txn.set_prop("merutable.first_seq", first_seq.0.to_string());
     txn.set_prop("merutable.last_seq", last_seq.0.to_string());
 
+    // RFC-0002: build the deduplicated, sorted user_key list once
+    // before commit_lock. The memtable's iter already yields entries
+    // in sorted (user_key ASC, seq DESC) order, so the dedup is a
+    // simple "skip-if-same-as-previous" walk. We do this OUTSIDE the
+    // commit_lock so the lock is held only for the resolve+commit
+    // chain — minimizes contention with concurrent compaction
+    // commits.
+    let dv_user_keys: Vec<Vec<u8>> = if engine.config.enable_flush_dv_emission {
+        let mut out: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+        let mut prev: Option<&[u8]> = None;
+        for e in &entries {
+            let uk = e.user_key.as_ref();
+            if prev != Some(uk) {
+                out.push(uk.to_vec());
+                prev = Some(uk);
+            }
+        }
+        out
+    } else {
+        Vec::new()
+    };
+
     // Commit snapshot. Serialized with concurrent compaction commits
     // via `commit_lock` — both paths compute `next_ver` from the
     // current manifest and write `v{N+1}.metadata.json`, so two
@@ -244,6 +266,40 @@ pub async fn run_flush(engine: &Arc<MeruEngine>) -> Result<()> {
     // this lock. The commit itself is brief (single fsync chain).
     let new_version = {
         let _commit_guard = engine.commit_lock.lock().await;
+
+        // RFC-0002: resolve flush-time DV deltas under the commit
+        // lock against the current pinned version. Holding
+        // commit_lock guarantees no compaction can replace files
+        // between resolve (computes file:position) and commit
+        // (stamps the DV blob into the new manifest).
+        if !dv_user_keys.is_empty() {
+            let pinned = engine.version_set.current().clone();
+            let base = engine.catalog.base_path().to_path_buf();
+            let schema_for_resolve = engine.schema.clone();
+            let keys_for_resolve = dv_user_keys.clone();
+            // Run on a blocking thread — the resolver does
+            // synchronous fs::read + Parquet decode and would
+            // otherwise stall the tokio runtime.
+            let dv_deltas = tokio::task::spawn_blocking(move || {
+                crate::engine::dv_resolve::resolve_dv_for_flush(
+                    &keys_for_resolve,
+                    &pinned,
+                    &base,
+                    &schema_for_resolve,
+                )
+            })
+            .await
+            .map_err(|e| MeruError::Compaction(format!("flush DV resolve join: {e}")))??;
+
+            for (path, bitmap) in dv_deltas {
+                let mut dv = crate::iceberg::DeletionVector::new();
+                for pos in &bitmap {
+                    dv.mark_deleted(pos);
+                }
+                txn.add_dv(path, dv);
+            }
+        }
+
         // Issue #14 Phase 3: per-commit duration histogram. Sampled
         // once per snapshot; includes the puffin-upload + manifest-
         // write + version-hint-rename chain.
