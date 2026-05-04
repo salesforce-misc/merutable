@@ -83,7 +83,7 @@ gives you the fast-writes; Iceberg compatible metadata layer gives you the analy
 
 ```toml
 [dependencies]
-merutable = "0.0.1"
+merutable = "0.0.2"
 ```
 
 ## Architecture at a glance
