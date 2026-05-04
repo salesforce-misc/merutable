@@ -12,6 +12,25 @@ pub struct FileStats {
     pub num_rows: u64,
     pub seq_range: (u64, u64),
     pub has_dv: bool,
+    /// Issue #89: when the file has an associated deletion vector,
+    /// the on-disk Puffin coords as recorded in the manifest. `None`
+    /// when `has_dv == false`. Cheap — populated from the version's
+    /// in-memory `DataFileMeta` with no extra I/O. Cardinality is
+    /// NOT included here (it would require opening the puffin blob);
+    /// callers that need it can read the blob via these coords.
+    pub dv: Option<DvStats>,
+}
+
+/// On-disk coords for a single Puffin DV blob. Surfaced in
+/// `FileStats::dv` for files that have a DV.
+#[derive(Debug, Clone)]
+pub struct DvStats {
+    /// Object-store-relative path of the `.puffin` file.
+    pub path: String,
+    /// Byte offset of the DV blob within the puffin file.
+    pub offset: i64,
+    /// Byte length of the DV blob.
+    pub length: i64,
 }
 
 /// Per-level statistics.
