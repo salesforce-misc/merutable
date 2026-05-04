@@ -95,3 +95,7 @@ harness = false
 [[bench]]
 name    = "engine_compaction"
 harness = false
+
+[[bench]]
+name    = "flush_dv_emission"
+harness = false
