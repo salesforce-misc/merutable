@@ -309,14 +309,28 @@ Each phase is independently reviewable and lands as its own PR.
 - Resolve every memtable entry; aggregate by file; `txn.add_dv`.
 - Integration tests from the table above.
 
-**Phase 4 — bench harness**
+**Phase 4 — bench harness** (landed)
 
-- Criterion bench:
-  - `bench_put_latency` — p99 baseline + post.
-  - `bench_flush_with_dv` — flush wall time vs. memtable size, dv ON vs. OFF.
-  - `bench_range_scan_post_flush` — vs. clean-Parquet baseline.
-- Numbers committed to `docs/rfc/0002-flush-time-deletion-vectors.md`
-  as a "Measured" addendum.
+- Criterion bench at `crates/merutable/benches/flush_dv_emission.rs`:
+  - `put_latency/{dv_off, dv_on}` — single-row `put` latency on a
+    pre-populated DB (1K rows in L1 so the resolver has work on the
+    next flush); memtable size 64 MiB so puts never trigger a flush
+    mid-bench.
+  - `flush_overhead/{dv_off, dv_on}` — flush wall time of 1K upserts
+    against an L1 file holding 1K priors.
+- Range-scan-throughput bench is a follow-on (deferred to a separate
+  bench module that owns the clean-Parquet baseline construction).
+
+### Measured (macOS, criterion --quick)
+
+| Metric | DV off | DV on | Δ |
+|---|---|---|---|
+| `put` mean | 3.88 ms | 3.68 ms | within noise (dv-on slightly faster; dominated by per-put fsync) |
+| 1K-upsert flush | 26.9 ms | 31.8 ms | +4.9 ms (+18%) |
+
+**The load-bearing contract holds:** dv_on ≈ dv_off on `put`. The
++18% on flush is the amortized resolve+puffin-write cost paid at the
+flush boundary, not at the upsert. Per-row marginal: ~5 μs.
 
 **Phase 5 — docs**
 
