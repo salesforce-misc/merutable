@@ -1306,6 +1306,20 @@ impl MeruEngine {
                     num_rows: f.meta.num_rows,
                     seq_range: (f.meta.seq_min, f.meta.seq_max),
                     has_dv: f.has_dv(),
+                    // Issue #89: surface DV coords from the version's
+                    // DataFileMeta. has_dv() == true ⇒ all three
+                    // dv_{path,offset,length} are Some by manifest
+                    // invariant; we still defensively bind only when
+                    // every component is present so a corrupt manifest
+                    // entry surfaces as `dv: None` rather than panicking.
+                    dv: match (f.dv_path.as_ref(), f.dv_offset, f.dv_length) {
+                        (Some(p), Some(o), Some(l)) => Some(crate::engine::stats::DvStats {
+                            path: p.clone(),
+                            offset: o,
+                            length: l,
+                        }),
+                        _ => None,
+                    },
                 })
                 .collect();
             levels.push(crate::engine::stats::LevelStats {

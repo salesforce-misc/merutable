@@ -286,6 +286,19 @@ impl PyMeruDB {
                 fd.set_item("num_rows", f.num_rows)?;
                 fd.set_item("seq_range", (f.seq_range.0, f.seq_range.1))?;
                 fd.set_item("has_dv", f.has_dv)?;
+                // Issue #89: surface DV coords as a nested dict so
+                // Python callers can audit DV state without poking
+                // the filesystem. None when the file has no DV.
+                match &f.dv {
+                    Some(dv) => {
+                        let dv_dict = PyDict::new_bound(py);
+                        dv_dict.set_item("path", &dv.path)?;
+                        dv_dict.set_item("offset", dv.offset)?;
+                        dv_dict.set_item("length", dv.length)?;
+                        fd.set_item("dv", &dv_dict)?;
+                    }
+                    None => fd.set_item("dv", py.None())?,
+                }
                 files_list.append(&fd)?;
             }
             ld.set_item("files", &files_list)?;
