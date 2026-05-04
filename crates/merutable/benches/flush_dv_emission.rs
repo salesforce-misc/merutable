@@ -224,10 +224,73 @@ fn bench_scan_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+/// Issue #92 measurement: scan latency DURING the upsert→flush
+/// window vs. post-flush. The RFC defers a transient scan-time
+/// bitmask "conditional on measurement showing the gap is meaningful."
+/// This bench provides the measurement.
+fn bench_window_scan(c: &mut Criterion) {
+    const N: i64 = 5_000;
+    let mut group = c.benchmark_group("scan_during_upsert_window");
+    group.throughput(Throughput::Elements(N as u64));
+
+    group.bench_function("in_window", |b| {
+        let rt = Runtime::new().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let db = rt.block_on(async {
+            let db = MeruDB::open(options(&tmp, true)).await.unwrap();
+            for i in 0..N {
+                db.put(make_row(i, "v0")).await.unwrap();
+            }
+            db.flush().await.unwrap();
+            db.compact().await.unwrap();
+            // Upsert WITHOUT flushing — this is the window.
+            for i in 0..N {
+                db.put(make_row(i, "v1")).await.unwrap();
+            }
+            Arc::new(db)
+        });
+        b.iter(|| {
+            let scan = db.scan(None, None).unwrap();
+            assert_eq!(scan.len(), N as usize);
+        });
+        rt.block_on(async {
+            let _ = Arc::try_unwrap(db).map_err(|_| ()).unwrap().close().await;
+        });
+    });
+
+    group.bench_function("post_flush", |b| {
+        let rt = Runtime::new().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let db = rt.block_on(async {
+            let db = MeruDB::open(options(&tmp, true)).await.unwrap();
+            for i in 0..N {
+                db.put(make_row(i, "v0")).await.unwrap();
+            }
+            db.flush().await.unwrap();
+            db.compact().await.unwrap();
+            for i in 0..N {
+                db.put(make_row(i, "v1")).await.unwrap();
+            }
+            db.flush().await.unwrap(); // close the window
+            Arc::new(db)
+        });
+        b.iter(|| {
+            let scan = db.scan(None, None).unwrap();
+            assert_eq!(scan.len(), N as usize);
+        });
+        rt.block_on(async {
+            let _ = Arc::try_unwrap(db).map_err(|_| ()).unwrap().close().await;
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_put_latency,
     bench_flush_overhead,
-    bench_scan_throughput
+    bench_scan_throughput,
+    bench_window_scan
 );
 criterion_main!(benches);
