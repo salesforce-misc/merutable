@@ -465,6 +465,247 @@ impl<R: ChunkReader + Clone + 'static> ParquetReader<R> {
         Ok(out)
     }
 
+    /// Streaming iterator over `(user_key_bytes, file_global_row_position)`
+    /// pairs whose `user_key` falls within `[lo, hi]` (inclusive on both
+    /// ends), in the file's natural sort order — `(user_key ASC, seq DESC)`.
+    ///
+    /// This is the read-side primitive for **flush-time deletion vector
+    /// resolution** (RFC-0002). The flush job range-merges the memtable
+    /// keys against this iterator to find every prior position of every
+    /// upserted key — without decoding the row payload.
+    ///
+    /// Properties:
+    ///
+    /// 1. **Disjoint range = zero I/O.** If `[lo, hi]` does not overlap
+    ///    the file's `key_min..=key_max`, the returned iterator yields
+    ///    nothing and the file's data pages are never opened. Asserted
+    ///    by `iter_user_keys_disjoint_range_yields_empty_no_io`.
+    /// 2. **Lazy.** Constructing the iterator (and dropping it without
+    ///    pulling) only walks the in-memory `KvSparseIndex` to compute
+    ///    the candidate page set — no data-page reads happen until the
+    ///    first `next()`. The constructor is allowed to error, but
+    ///    must not perform Parquet I/O on disjoint inputs.
+    /// 3. **Multi-version yield.** A `user_key` with N versions in the
+    ///    file yields N tuples — one per InternalKey occurrence —
+    ///    in `seq DESC` order (the natural file order). The caller
+    ///    (`engine::dv_resolve`) marks every position so an upsert
+    ///    DV-marks every prior version, not just the latest.
+    /// 4. **No row decode.** Only the `_merutable_ikey` column is
+    ///    projected. Per-column field extraction and postcard blob
+    ///    decode are skipped — saves both CPU and column-chunk I/O at
+    ///    L1+ where typed columns dominate the file size.
+    /// 5. **Fallback for kv-index-less files.** Files written without
+    ///    `merutable.kv_index.v1` (legacy or empty) fall through to a
+    ///    full-file scan, then in-memory filter. Correct, slower; the
+    ///    fast path is the kv_index-driven page selection.
+    pub fn iter_user_keys_in_range<'a>(
+        &'a self,
+        lo: &[u8],
+        hi: &[u8],
+    ) -> Result<RangeKeyIter<'a, R>> {
+        // Cheap range-disjoint check first — if the file's recorded
+        // key bounds don't overlap [lo, hi], short-circuit with no
+        // page work at all. The bounds are byte-comparable per
+        // InternalKey's encoding (user_key prefix dominates).
+        let disjoint = (!self.meta.key_min.is_empty() && hi < self.meta.key_min.as_slice())
+            || (!self.meta.key_max.is_empty() && lo > self.meta.key_max.as_slice())
+            || lo > hi; // caller-supplied empty range
+        if disjoint {
+            return Ok(RangeKeyIter {
+                reader: self,
+                lo: Vec::new(),
+                hi: Vec::new(),
+                pages: Vec::new(),
+                next_page_idx: 0,
+                buffer: std::collections::VecDeque::new(),
+                fallback_done: true, // no work to do
+            });
+        }
+
+        // No kv_index: full-file scan fallback. Defer the actual scan
+        // to first `next()` so this constructor stays I/O-free on
+        // construction (lazy contract).
+        if self.kv_index.is_none() {
+            return Ok(RangeKeyIter {
+                reader: self,
+                lo: lo.to_vec(),
+                hi: hi.to_vec(),
+                pages: Vec::new(),
+                next_page_idx: 0,
+                buffer: std::collections::VecDeque::new(),
+                fallback_done: false,
+            });
+        }
+
+        // kv_index path: walk the in-memory index entries to compute
+        // the set of pages whose key range overlaps [lo, hi]. Each
+        // entry covers `[entry.key, next_entry.key)` (or `[entry.key,
+        // file_end)` for the last entry). A page is needed iff:
+        //   - entry.key <= hi          (otherwise above the window)
+        //   - next.key  >  lo          (otherwise entirely below it)
+        //                              (no `next` ⇒ last page, include
+        //                              if entry.key <= hi).
+        //
+        // We collect (PageLocation, next_first_row) so the per-page
+        // read function can clamp to row-group boundaries the same way
+        // `read_rows_in_page` does.
+        let entries: Vec<(Vec<u8>, PageLocation)> =
+            self.kv_index.as_ref().unwrap().iter().collect();
+        let mut pages: Vec<(PageLocation, Option<u64>)> = Vec::new();
+        for i in 0..entries.len() {
+            let (entry_key, page_loc) = &entries[i];
+            // entry_key is a full InternalKey byte string; we compare
+            // against `hi` (a user_key). InternalKey encoding places
+            // user_key bytes first then an 8-byte seq/op trailer, so
+            // an InternalKey starting with bytes > hi is unambiguously
+            // above hi in user-key order. The reverse — entry_key
+            // starts with bytes <= hi — does NOT prove the page is
+            // needed (its first key may have user_key == hi but
+            // trailer bytes that make the full InternalKey compare
+            // greater than `hi`-with-zero-trailer); we let the
+            // per-page filter handle that boundary case correctly.
+            let entry_uk = ikey_user_key_prefix(entry_key);
+            if entry_uk.as_slice() > hi {
+                break; // this page and every later page start above hi
+            }
+            // Skip pages entirely below lo: covered when next entry
+            // exists and its first user_key is <= lo (page i ends at
+            // next entry's start, exclusive).
+            if let Some((next_key, _)) = entries.get(i + 1) {
+                let next_uk = ikey_user_key_prefix(next_key);
+                if next_uk.as_slice() <= lo {
+                    continue;
+                }
+            }
+            let next_first_row = entries.get(i + 1).map(|(_, loc)| loc.first_row_index);
+            pages.push((*page_loc, next_first_row));
+        }
+
+        Ok(RangeKeyIter {
+            reader: self,
+            lo: lo.to_vec(),
+            hi: hi.to_vec(),
+            pages,
+            next_page_idx: 0,
+            buffer: std::collections::VecDeque::new(),
+            fallback_done: true, // no fallback needed when kv_index drove selection
+        })
+    }
+
+    /// ikey-only counterpart of `read_rows_in_page`. Same row-group
+    /// math; projects only `_merutable_ikey` so the value blob /
+    /// typed user columns are never decoded. Returns
+    /// `(InternalKey, file_global_position)` per row in page order.
+    fn read_ikeys_in_page(
+        &self,
+        page_loc: PageLocation,
+        next_first_row: Option<u64>,
+    ) -> Result<Vec<(InternalKey, u64)>> {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(self.source.clone())
+            .map_err(|e| MeruError::Parquet(e.to_string()))?;
+
+        let metadata = builder.metadata().clone();
+        let mut cum: u64 = 0;
+        let mut found: Option<(usize, u64, u64)> = None;
+        for (rg_idx, rg) in metadata.row_groups().iter().enumerate() {
+            let rg_num_rows = rg.num_rows();
+            if rg_num_rows < 0 {
+                return Err(MeruError::Corruption(format!(
+                    "negative num_rows {} in row group {rg_idx}",
+                    rg_num_rows
+                )));
+            }
+            let rg_rows = rg_num_rows as u64;
+            let rg_start = cum;
+            let rg_end = cum + rg_rows;
+            if page_loc.first_row_index >= rg_start && page_loc.first_row_index < rg_end {
+                found = Some((rg_idx, rg_start, rg_end));
+                break;
+            }
+            cum = rg_end;
+        }
+        let (rg_idx, rg_start, rg_end) = found.ok_or_else(|| {
+            MeruError::Parquet(format!(
+                "kv_index page first_row_index {} out of range for file row count {}",
+                page_loc.first_row_index, cum
+            ))
+        })?;
+
+        let upper = match next_first_row {
+            Some(n) if n <= rg_end => n,
+            _ => rg_end,
+        };
+        let page_row_count = (upper - page_loc.first_row_index) as usize;
+        let intra_rg_offset = (page_loc.first_row_index - rg_start) as usize;
+
+        let mask = self.ikey_only_projection_mask(builder.parquet_schema())?;
+        let mut selectors: Vec<RowSelector> = Vec::with_capacity(2);
+        if intra_rg_offset > 0 {
+            selectors.push(RowSelector::skip(intra_rg_offset));
+        }
+        if page_row_count == 0 {
+            return Ok(Vec::new());
+        }
+        selectors.push(RowSelector::select(page_row_count));
+        let selection = RowSelection::from(selectors);
+
+        let reader = builder
+            .with_row_groups(vec![rg_idx])
+            .with_projection(mask)
+            .with_row_selection(selection)
+            .build()
+            .map_err(|e| MeruError::Parquet(e.to_string()))?;
+
+        let mut out: Vec<(InternalKey, u64)> = Vec::with_capacity(page_row_count);
+        let mut row_offset = page_loc.first_row_index;
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| MeruError::Parquet(e.to_string()))?;
+            let ikeys = codec::record_batch_to_ikeys(&batch, &self.schema)?;
+            for ik in ikeys {
+                out.push((ik, row_offset));
+                row_offset += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// ikey-only full-file scan. Fallback for files lacking
+    /// `merutable.kv_index.v1`. Returns every InternalKey in file
+    /// order with its global row index.
+    fn read_all_ikeys(&self) -> Result<Vec<(InternalKey, u64)>> {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(self.source.clone())
+            .map_err(|e| MeruError::Parquet(e.to_string()))?;
+
+        let mask = self.ikey_only_projection_mask(builder.parquet_schema())?;
+        let reader = builder
+            .with_projection(mask)
+            .build()
+            .map_err(|e| MeruError::Parquet(e.to_string()))?;
+
+        let mut out: Vec<(InternalKey, u64)> = Vec::with_capacity(self.meta.num_rows as usize);
+        let mut row_offset: u64 = 0;
+        for batch_result in reader {
+            let batch = batch_result.map_err(|e| MeruError::Parquet(e.to_string()))?;
+            let ikeys = codec::record_batch_to_ikeys(&batch, &self.schema)?;
+            for ik in ikeys {
+                out.push((ik, row_offset));
+                row_offset += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Single-leaf projection of `_merutable_ikey` only. Skips both
+    /// the L0 `_merutable_value` blob and L1+ typed columns — DV
+    /// resolution doesn't need any of them.
+    fn ikey_only_projection_mask(
+        &self,
+        parquet_schema: &parquet::schema::types::SchemaDescriptor,
+    ) -> Result<ProjectionMask> {
+        let leaf = find_leaf(parquet_schema, IKEY_COLUMN_NAME)?;
+        Ok(ProjectionMask::leaves(parquet_schema, vec![leaf]))
+    }
+
     /// Build the level-aware leaf-column projection mask used by both
     /// `read_all_rows` and `read_rows_in_page`. At L0 we project only
     /// `[_merutable_ikey, _merutable_value]` (the postcard fast path); at
@@ -519,6 +760,90 @@ fn find_leaf(schema: &parquet::schema::types::SchemaDescriptor, name: &str) -> R
 /// the codec fills with a default.
 fn find_leaf_opt(schema: &parquet::schema::types::SchemaDescriptor, name: &str) -> Option<usize> {
     (0..schema.num_columns()).find(|&i| schema.column(i).name() == name)
+}
+
+/// Strip the InternalKey 8-byte trailer to expose the user_key prefix.
+/// Defensive: if the input is shorter than 8 bytes, returns the input
+/// unchanged (a malformed kv_index entry will surface as a downstream
+/// decode error rather than a panic here).
+fn ikey_user_key_prefix(ikey_bytes: &[u8]) -> Vec<u8> {
+    if ikey_bytes.len() < 8 {
+        return ikey_bytes.to_vec();
+    }
+    ikey_bytes[..ikey_bytes.len() - 8].to_vec()
+}
+
+/// Lazy iterator over `(user_key_bytes, file_global_position)` pairs
+/// in `[lo, hi]`, returned by [`ParquetReader::iter_user_keys_in_range`].
+///
+/// State machine:
+/// - **kv_index path** — `pages` is pre-computed (cheap in-memory
+///   walk); `next_page_idx` advances as pages are consumed; `buffer`
+///   is the decoded ikeys from the current page, drained on each
+///   `next()`. `fallback_done = true`.
+/// - **Full-file fallback path** — `pages` is empty; `fallback_done`
+///   starts `false`; on the first `next()` we read every ikey in the
+///   file, filter to `[lo, hi]`, and load `buffer` once.
+/// - **Disjoint short-circuit** — `pages` empty AND `fallback_done = true`
+///   AND `buffer` empty ⇒ iterator yields nothing, never touches I/O.
+///
+/// The iterator borrows `&'a ParquetReader<R>` so the buffered
+/// `source: R` stays alive for the lifetime of the scan.
+pub struct RangeKeyIter<'a, R: ChunkReader + Clone> {
+    reader: &'a ParquetReader<R>,
+    lo: Vec<u8>,
+    hi: Vec<u8>,
+    pages: Vec<(PageLocation, Option<u64>)>,
+    next_page_idx: usize,
+    buffer: std::collections::VecDeque<(Vec<u8>, u64)>,
+    fallback_done: bool,
+}
+
+impl<'a, R: ChunkReader + Clone + 'static> Iterator for RangeKeyIter<'a, R> {
+    type Item = Result<(Vec<u8>, u64)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.buffer.pop_front() {
+                return Some(Ok(item));
+            }
+            // Buffer empty: refill from next page (kv_index path) or
+            // from the one-shot full-file scan (fallback path).
+            if self.next_page_idx < self.pages.len() {
+                let (page_loc, next_first_row) = self.pages[self.next_page_idx];
+                self.next_page_idx += 1;
+                match self.reader.read_ikeys_in_page(page_loc, next_first_row) {
+                    Ok(rows) => {
+                        for (ik, pos) in rows {
+                            let uk = ik.user_key_bytes();
+                            // Inclusive [lo, hi] filter on user_key.
+                            if uk >= self.lo.as_slice() && uk <= self.hi.as_slice() {
+                                self.buffer.push_back((uk.to_vec(), pos));
+                            }
+                        }
+                        continue; // try buffer again
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            if !self.fallback_done {
+                self.fallback_done = true;
+                match self.reader.read_all_ikeys() {
+                    Ok(rows) => {
+                        for (ik, pos) in rows {
+                            let uk = ik.user_key_bytes();
+                            if uk >= self.lo.as_slice() && uk <= self.hi.as_slice() {
+                                self.buffer.push_back((uk.to_vec(), pos));
+                            }
+                        }
+                        continue;
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+            return None; // exhausted
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1332,5 +1657,267 @@ mod tests {
         .unwrap();
         assert!(bytes.is_empty());
         assert_eq!(meta.num_rows, 0);
+    }
+
+    // ── iter_user_keys_in_range tests (RFC-0002 Phase 1) ─────────────────────
+
+    /// Build a deterministic file with `id ∈ [first_id, first_id + count)`,
+    /// each at `seq = id` (so positions and ids align). Single-version
+    /// per key.
+    fn write_id_sequence(first_id: i64, count: usize) -> (Vec<u8>, TableSchema) {
+        let schema = test_schema();
+        let mut rows = Vec::with_capacity(count);
+        for offset in 0..count {
+            let id = first_id + offset as i64;
+            let ikey = make_ikey(id, id as u64);
+            let row = Row::new(vec![
+                Some(FieldValue::Int64(id)),
+                Some(FieldValue::Bytes(BBytes::from(format!("v{id}")))),
+            ]);
+            rows.push((ikey, row));
+        }
+        let bytes = write_test_file(rows, &schema);
+        (bytes, schema)
+    }
+
+    /// Encode a probe user_key for `id` (matches `make_ikey`'s PK
+    /// encoding). Useful for `iter_user_keys_in_range(lo, hi)`
+    /// constructing comparable user_key bounds.
+    fn user_key_for(id: i64) -> Vec<u8> {
+        let ik = make_ikey(id, 0);
+        ik.user_key_bytes().to_vec()
+    }
+
+    #[test]
+    fn iter_user_keys_full_range_yields_every_position() {
+        let (bytes, schema) = write_id_sequence(0, 64);
+        let reader = ParquetReader::open(BBytes::from(bytes), Arc::new(schema)).unwrap();
+
+        let lo = user_key_for(i64::MIN);
+        let hi = user_key_for(i64::MAX);
+        let collected: Vec<(Vec<u8>, u64)> = reader
+            .iter_user_keys_in_range(&lo, &hi)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(
+            collected.len(),
+            64,
+            "every row must be yielded exactly once"
+        );
+        // Positions are 0..64 in order — the file is single-version sorted ASC.
+        for (i, (uk, pos)) in collected.iter().enumerate() {
+            assert_eq!(*pos, i as u64, "position {i} mismatch");
+            assert_eq!(uk, &user_key_for(i as i64), "user_key {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn iter_user_keys_partial_range_yields_only_overlap() {
+        let (bytes, schema) = write_id_sequence(0, 64);
+        let reader = ParquetReader::open(BBytes::from(bytes), Arc::new(schema)).unwrap();
+
+        // Restrict to id ∈ [10, 20] inclusive on both ends.
+        let lo = user_key_for(10);
+        let hi = user_key_for(20);
+        let collected: Vec<(Vec<u8>, u64)> = reader
+            .iter_user_keys_in_range(&lo, &hi)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Tight equality: exactly 11 rows (10..=20), positions 10..=20.
+        assert_eq!(collected.len(), 11);
+        let pos: Vec<u64> = collected.iter().map(|(_, p)| *p).collect();
+        assert_eq!(pos, (10u64..=20).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn iter_user_keys_disjoint_range_above_yields_empty_no_io() {
+        let (bytes, schema) = write_id_sequence(0, 64);
+        // Wrap source in a counting reader to assert zero I/O.
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = CountingBytes::new(BBytes::from(bytes), counter.clone());
+        let reader = ParquetReader::open(counted, Arc::new(schema)).unwrap();
+
+        // Reset after open() — open reads the footer; we only care
+        // about post-construction I/O.
+        let baseline = counter.load(std::sync::atomic::Ordering::SeqCst);
+
+        let lo = user_key_for(1000); // far above the id range [0..64)
+        let hi = user_key_for(2000);
+        let iter = reader.iter_user_keys_in_range(&lo, &hi).unwrap();
+        // Construction MUST be I/O-free for disjoint ranges.
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            baseline,
+            "disjoint-range constructor must not perform I/O"
+        );
+        let collected: Vec<_> = iter.map(|r| r.unwrap()).collect();
+        assert!(collected.is_empty(), "disjoint range must yield nothing");
+        // Pulling the iterator on a disjoint range MUST also be I/O-free.
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            baseline,
+            "disjoint-range pull must not perform I/O"
+        );
+    }
+
+    #[test]
+    fn iter_user_keys_disjoint_range_below_yields_empty() {
+        let (bytes, schema) = write_id_sequence(100, 64);
+        let reader = ParquetReader::open(BBytes::from(bytes), Arc::new(schema)).unwrap();
+        let lo = user_key_for(0);
+        let hi = user_key_for(50); // entirely below [100..164)
+        let collected: Vec<_> = reader
+            .iter_user_keys_in_range(&lo, &hi)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(collected.is_empty());
+    }
+
+    #[test]
+    fn iter_user_keys_inverted_range_yields_empty() {
+        let (bytes, schema) = write_id_sequence(0, 16);
+        let reader = ParquetReader::open(BBytes::from(bytes), Arc::new(schema)).unwrap();
+        let lo = user_key_for(10);
+        let hi = user_key_for(5); // hi < lo
+        let collected: Vec<_> = reader
+            .iter_user_keys_in_range(&lo, &hi)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(collected.is_empty());
+    }
+
+    #[test]
+    fn iter_user_keys_single_key_range() {
+        let (bytes, schema) = write_id_sequence(0, 64);
+        let reader = ParquetReader::open(BBytes::from(bytes), Arc::new(schema)).unwrap();
+        let lo = user_key_for(42);
+        let hi = lo.clone();
+        let collected: Vec<_> = reader
+            .iter_user_keys_in_range(&lo, &hi)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].1, 42, "position");
+        assert_eq!(collected[0].0, lo, "user_key");
+    }
+
+    #[test]
+    fn iter_user_keys_yields_every_version_of_multiversion_key() {
+        // Same id at three different seqs — file order is
+        // (user_key ASC, seq DESC), so positions 0,1,2 carry seqs
+        // 30, 20, 10 for id=7. All three positions must be yielded.
+        let schema = test_schema();
+        let id: i64 = 7;
+        let mut rows = Vec::new();
+        for &seq in &[30u64, 20, 10] {
+            let ikey = make_ikey(id, seq);
+            let row = Row::new(vec![
+                Some(FieldValue::Int64(id)),
+                Some(FieldValue::Bytes(BBytes::from(format!("v{seq}")))),
+            ]);
+            rows.push((ikey, row));
+        }
+        let bytes = write_test_file(rows, &schema);
+        let reader = ParquetReader::open(BBytes::from(bytes), Arc::new(schema)).unwrap();
+
+        let uk = user_key_for(id);
+        let collected: Vec<_> = reader
+            .iter_user_keys_in_range(&uk, &uk)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(collected.len(), 3, "every version must yield");
+        assert_eq!(
+            collected.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        for (yielded_uk, _) in &collected {
+            assert_eq!(yielded_uk, &uk);
+        }
+    }
+
+    #[test]
+    fn iter_user_keys_lazy_construction_is_io_free() {
+        // Sanity check the lazy-construction property for an
+        // OVERLAPPING range too: building the iterator (kv_index
+        // page-set computation) must not touch data pages.
+        let (bytes, schema) = write_id_sequence(0, 64);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = CountingBytes::new(BBytes::from(bytes), counter.clone());
+        let reader = ParquetReader::open(counted, Arc::new(schema)).unwrap();
+        let baseline = counter.load(std::sync::atomic::Ordering::SeqCst);
+
+        let lo = user_key_for(20);
+        let hi = user_key_for(30);
+        let iter = reader.iter_user_keys_in_range(&lo, &hi).unwrap();
+        // Constructing must NOT have read any data pages — the
+        // kv_index walk happens entirely against the in-memory
+        // index decoded at `open` time.
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            baseline,
+            "iterator construction must be I/O-free"
+        );
+        // Drop without pulling — still no I/O.
+        drop(iter);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            baseline,
+            "dropping unpulled iterator must be I/O-free"
+        );
+
+        // Now pull — I/O must happen.
+        let _: Vec<_> = reader
+            .iter_user_keys_in_range(&lo, &hi)
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            counter.load(std::sync::atomic::Ordering::SeqCst) > baseline,
+            "pulling must trigger reads"
+        );
+    }
+
+    /// Counting wrapper around `Bytes` to assert zero-I/O paths.
+    /// Implements `ChunkReader` + `Length` by delegating to `Bytes`
+    /// while incrementing a counter on every `get_bytes` / `get_read`
+    /// call.
+    #[derive(Clone)]
+    struct CountingBytes {
+        inner: BBytes,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingBytes {
+        fn new(inner: BBytes, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            Self { inner, counter }
+        }
+    }
+
+    impl parquet::file::reader::Length for CountingBytes {
+        fn len(&self) -> u64 {
+            self.inner.len() as u64
+        }
+    }
+
+    impl parquet::file::reader::ChunkReader for CountingBytes {
+        type T = bytes::buf::Reader<BBytes>;
+        fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+            self.counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get_read(start)
+        }
+        fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<BBytes> {
+            self.counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.get_bytes(start, length)
+        }
     }
 }

@@ -3,6 +3,7 @@ pub mod cache;
 pub mod codec;
 pub mod compaction;
 pub mod config;
+pub mod dv_resolve;
 // Issue #38: workspace collapsed; the former crate's `lib.rs` →
 // `mod.rs`, and the former `engine.rs` retains its name to keep
 // the public path `crate::engine::engine::MeruEngine` stable for
@@ -18,4 +19,4 @@ pub mod write_path;
 
 pub use config::EngineConfig;
 pub use engine::MeruEngine;
-pub use stats::{CacheStats, EngineStats, FileStats, LevelStats, MemtableStats};
+pub use stats::{CacheStats, DvStats, EngineStats, FileStats, LevelStats, MemtableStats};
