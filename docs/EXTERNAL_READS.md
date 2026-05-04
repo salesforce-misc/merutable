@@ -7,10 +7,34 @@ external reader MUST apply this projection.** A naive `SELECT *`
 returns MVCC duplicates and tombstones as if they were valid distinct
 rows — silent wrong answers.
 
-This contract is structurally unavoidable for any LSM-based external analytics
-table. It is not a temporary gap that future work removes. See
-[RFC #19](https://github.com/merutable/merutable/issues/19) for why
-Deletion Vectors cannot replace it.
+**As of 0.0.2 (RFC-0002, issue #73), snapshots produced by merutable's
+own flush emit per-file deletion vectors that DV-mark every prior
+version of every upserted/deleted memtable key. External Iceberg
+readers see one row per primary key without the projection below.**
+The projection is still required for:
+
+- Snapshots written by pre-0.0.2 merutable.
+- Snapshots written by a 0.0.2+ writer running with
+  `OpenOptions::enable_flush_dv_emission(false)`.
+- Tombstone filtering (`_merutable_op = 1`), which the projection
+  still handles since DVs cover prior versions but not the new
+  L0 row representing the delete.
+
+### How to tell which mode produced a snapshot
+
+Issue #93: every flush commit stamps a snapshot summary property
+`merutable.flush_dv_emission` set to `"true"` or `"false"`.
+Snapshots written before 0.0.2 do not carry the property at all.
+
+```sql
+-- DuckDB: list the snapshot summary properties.
+SELECT properties
+FROM iceberg_snapshots('/path/to/exported/metadata.json');
+```
+
+If the property is missing or `"false"`, apply the full projection
+below. If `"true"`, you can drop the `ROW_NUMBER()` deduplication
+and keep only the `_merutable_op = 1` tombstone filter.
 
 ## Go through the Iceberg manifest, never glob raw Parquet
 

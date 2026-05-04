@@ -1,6 +1,6 @@
 [package]
 name          = "merutable"
-version       = "0.0.1"
+version       = "0.0.2"
 edition       = "2021"
 description   = "Embeddable single-table engine: row + columnar Parquet with Iceberg-compatible metadata"
 keywords      = ["embedded", "lsm", "iceberg", "parquet", "table"]
@@ -94,4 +94,8 @@ harness = false
 
 [[bench]]
 name    = "engine_compaction"
+harness = false
+
+[[bench]]
+name    = "flush_dv_emission"
 harness = false

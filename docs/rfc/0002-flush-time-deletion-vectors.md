@@ -309,14 +309,36 @@ Each phase is independently reviewable and lands as its own PR.
 - Resolve every memtable entry; aggregate by file; `txn.add_dv`.
 - Integration tests from the table above.
 
-**Phase 4 — bench harness**
+**Phase 4 — bench harness** (landed)
 
-- Criterion bench:
-  - `bench_put_latency` — p99 baseline + post.
-  - `bench_flush_with_dv` — flush wall time vs. memtable size, dv ON vs. OFF.
-  - `bench_range_scan_post_flush` — vs. clean-Parquet baseline.
-- Numbers committed to `docs/rfc/0002-flush-time-deletion-vectors.md`
-  as a "Measured" addendum.
+- Criterion bench at `crates/merutable/benches/flush_dv_emission.rs`:
+  - `put_latency/{dv_off, dv_on}` — single-row `put` latency on a
+    pre-populated DB (1K rows in L1 so the resolver has work on the
+    next flush); memtable size 64 MiB so puts never trigger a flush
+    mid-bench.
+  - `flush_overhead/{dv_off, dv_on}` — flush wall time of 1K upserts
+    against an L1 file holding 1K priors.
+- Range-scan-throughput bench landed in issue #91; numbers below.
+
+### Measured (macOS, criterion --quick)
+
+| Metric | Value | Comparator | Δ |
+|---|---|---|---|
+| `put` mean (dv_off) | 3.88 ms | — | — |
+| `put` mean (dv_on) | 3.68 ms | dv_off | within noise |
+| 1K-upsert flush (dv_off) | 26.9 ms | — | — |
+| 1K-upsert flush (dv_on) | 31.8 ms | dv_off | +4.9 ms (+18%) |
+| 5K range-scan (clean) | 4.27 ms / 1.17 M elem/s | — | — |
+| 5K range-scan (post-upsert) | 6.75 ms / 0.74 M elem/s | clean | **0.63× throughput (1.58× slower)** — within the 2× bound |
+
+**The load-bearing contract holds:** dv_on ≈ dv_off on `put`. The
++18% on flush is the amortized resolve+puffin-write cost paid at the
+flush boundary, not at the upsert. Per-row marginal: ~5 μs.
+
+**Range-scan post-flush stays within constant factor of clean.** The
+1.58× slowdown is the cost of opening DV blobs alongside data files
+and applying the bitmap during the merge — bounded, predictable,
+inside the 2× bar.
 
 **Phase 5 — docs**
 
