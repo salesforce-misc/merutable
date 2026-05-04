@@ -149,5 +149,85 @@ fn bench_flush_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_put_latency, bench_flush_overhead);
+/// Issue #91: range-scan throughput post-flush vs. clean-Parquet
+/// baseline. The RFC's acceptance criterion is "within constant
+/// factor of clean-Parquet"; this bench pins where we sit.
+///
+/// Workload:
+/// - Pre-populate a snapshot with N rows, force-compact into L1.
+/// - Upsert all N rows, force-flush. Now L1 carries a full DV and
+///   L0 carries the new versions.
+/// - Bench: full-table scan via `db.scan(None, None)`.
+///
+/// Comparator: same N rows materialized into a single in-memory
+/// Vec<Row> via `db.scan` on a CLEAN snapshot (no upserts, no DV).
+/// This is the closest apples-to-apples we get for "what does the
+/// engine's scan path cost when there is nothing to reconcile."
+///
+/// We intentionally bench `db.scan` (the engine path) on both sides
+/// so the comparison isolates the DV-handling cost — not the
+/// pyarrow / DuckDB scan stack which would conflate codepaths.
+fn bench_scan_throughput(c: &mut Criterion) {
+    const N: i64 = 5_000;
+    let mut group = c.benchmark_group("scan_throughput_post_flush");
+    group.throughput(Throughput::Elements(N as u64));
+
+    // Baseline: clean snapshot, no DV (no upsert ever happened).
+    group.bench_function("clean", |b| {
+        let rt = Runtime::new().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let db = rt.block_on(async {
+            let db = MeruDB::open(options(&tmp, true)).await.unwrap();
+            for i in 0..N {
+                db.put(make_row(i, "v")).await.unwrap();
+            }
+            db.flush().await.unwrap();
+            db.compact().await.unwrap();
+            Arc::new(db)
+        });
+        b.iter(|| {
+            let scan = db.scan(None, None).unwrap();
+            assert_eq!(scan.len(), N as usize);
+        });
+        rt.block_on(async {
+            let _ = Arc::try_unwrap(db).map_err(|_| ()).unwrap().close().await;
+        });
+    });
+
+    // Post-upsert: snapshot has L1 with full DV + L0 with new
+    // versions. The scan path applies DV per file then merges.
+    group.bench_function("post_upsert", |b| {
+        let rt = Runtime::new().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let db = rt.block_on(async {
+            let db = MeruDB::open(options(&tmp, true)).await.unwrap();
+            for i in 0..N {
+                db.put(make_row(i, "v0")).await.unwrap();
+            }
+            db.flush().await.unwrap();
+            db.compact().await.unwrap();
+            for i in 0..N {
+                db.put(make_row(i, "v1")).await.unwrap();
+            }
+            db.flush().await.unwrap();
+            Arc::new(db)
+        });
+        b.iter(|| {
+            let scan = db.scan(None, None).unwrap();
+            assert_eq!(scan.len(), N as usize);
+        });
+        rt.block_on(async {
+            let _ = Arc::try_unwrap(db).map_err(|_| ()).unwrap().close().await;
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_put_latency,
+    bench_flush_overhead,
+    bench_scan_throughput
+);
 criterion_main!(benches);
