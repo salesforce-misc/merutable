@@ -1290,6 +1290,47 @@ mod tests {
         }
     }
 
+    // ── Issue #93: snapshot-level flush_dv_emission marker ──────────────────
+
+    /// Flush emits a `merutable.flush_dv_emission` summary property
+    /// matching the engine config. External readers + operators use it
+    /// to decide whether the legacy MVCC dedup projection is required.
+    #[tokio::test]
+    async fn flush_stamps_dv_emission_marker_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(test_options(&tmp).memtable_size_mb(1))
+            .await
+            .unwrap();
+        db.put(make_row(1, "x")).await.unwrap();
+        db.flush().await.unwrap();
+        let manifest = db.engine_for_replica().current_manifest().await;
+        let v = manifest
+            .properties
+            .get("merutable.flush_dv_emission")
+            .expect("flush must stamp the marker");
+        assert_eq!(v, "true", "default config has flush DV emission ON");
+    }
+
+    #[tokio::test]
+    async fn flush_stamps_dv_emission_marker_false_when_opt_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = MeruDB::open(
+            test_options(&tmp)
+                .memtable_size_mb(1)
+                .enable_flush_dv_emission(false),
+        )
+        .await
+        .unwrap();
+        db.put(make_row(1, "x")).await.unwrap();
+        db.flush().await.unwrap();
+        let manifest = db.engine_for_replica().current_manifest().await;
+        let v = manifest
+            .properties
+            .get("merutable.flush_dv_emission")
+            .expect("flush must stamp the marker even when off");
+        assert_eq!(v, "false", "opt-out config records false");
+    }
+
     /// Files with a DV report a populated `dv` whose path/offset/length
     /// match a real puffin file on disk.
     #[tokio::test]

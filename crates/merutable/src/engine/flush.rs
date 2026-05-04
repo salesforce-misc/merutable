@@ -236,6 +236,21 @@ pub async fn run_flush(engine: &Arc<MeruEngine>) -> Result<()> {
     txn.set_prop("merutable.job", "flush");
     txn.set_prop("merutable.first_seq", first_seq.0.to_string());
     txn.set_prop("merutable.last_seq", last_seq.0.to_string());
+    // Issue #93: snapshot-level marker so external readers (and
+    // operators auditing historical snapshots) can tell whether
+    // this commit's prior-version DVs were emitted at flush time.
+    // Snapshots written before 0.0.2 — or by a writer running with
+    // OpenOptions::enable_flush_dv_emission(false) — won't carry
+    // this prop, signaling that the MVCC dedup projection in
+    // docs/EXTERNAL_READS.md is still required for them.
+    txn.set_prop(
+        "merutable.flush_dv_emission",
+        if engine.config.enable_flush_dv_emission {
+            "true"
+        } else {
+            "false"
+        },
+    );
 
     // RFC-0002: build the deduplicated, sorted user_key list once
     // before commit_lock. The memtable's iter already yields entries
