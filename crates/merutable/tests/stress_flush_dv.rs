@@ -119,10 +119,21 @@ fn walk_dirs(base: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// - Final read returns exactly the latest version of every key.
 /// - DV cardinality across the snapshot covers every prior version
 ///   (so external Iceberg readers would see one row per PK).
+///
+/// **Disables background compaction** (`compaction_parallelism: 0`)
+/// to keep the per-flush DV blobs alive on disk. With background
+/// compaction running + `gc_grace_period_secs=0`, the prior L0 files
+/// (with their DV blobs attached) get merged into a clean L1 file
+/// and immediately GC'd — correct engine behavior, but it deletes
+/// the puffin files this test counts. The DV-correctness invariant
+/// post-compaction is "no duplicate rows visible," which the
+/// `scan` + `get` assertions below cover; the puffin-file count
+/// is the BEFORE-compaction observable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_repeated_upsert_sweep_preserves_pk_uniqueness() {
     let tmp = TempDir::new().unwrap();
-    let db = MeruDB::open(open(&tmp)).await.unwrap();
+    let opts = open(&tmp).compaction_parallelism(0);
+    let db = MeruDB::open(opts).await.unwrap();
 
     const N_KEYS: i64 = 500;
     const ROUNDS: i64 = 5;
@@ -368,7 +379,12 @@ async fn stress_large_dv_cardinality_per_file() {
         .wal_dir(tmp.path().join("wal"))
         .catalog_uri(tmp.path().to_string_lossy().to_string())
         .memtable_size_mb(8)
-        .gc_grace_period_secs(0);
+        .gc_grace_period_secs(0)
+        // Disable background compaction so the DV blob this test
+        // counts isn't merged away + GC'd between flush and the
+        // total_dv_cardinality walk. See the equivalent guard on
+        // stress_repeated_upsert_sweep_preserves_pk_uniqueness.
+        .compaction_parallelism(0);
     let db = MeruDB::open(opts).await.unwrap();
 
     const N: i64 = 10_000;
@@ -409,8 +425,12 @@ async fn stress_large_dv_cardinality_per_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_reopen_preserves_dv_state() {
     let tmp = TempDir::new().unwrap();
+    // Disable background compaction so the DV blob this test counts
+    // isn't merged away + GC'd. Same rationale as the other
+    // total_dv_cardinality-bearing stress tests.
+    let opts_disabled = || open(&tmp).compaction_parallelism(0);
     {
-        let db = MeruDB::open(open(&tmp)).await.unwrap();
+        let db = MeruDB::open(opts_disabled()).await.unwrap();
         for id in 0..100 {
             db.put(make_row(id, 0, "v0")).await.unwrap();
         }
@@ -426,7 +446,7 @@ async fn stress_reopen_preserves_dv_state() {
     }
 
     // Reopen.
-    let db = MeruDB::open(open(&tmp)).await.unwrap();
+    let db = MeruDB::open(opts_disabled()).await.unwrap();
     let card_after = total_dv_cardinality(&db).await;
     assert_eq!(card_after, 100, "DV state must survive reopen");
 
