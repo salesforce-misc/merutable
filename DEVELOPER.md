@@ -2,10 +2,12 @@
 
 ## Prerequisites
 
-- **Rust stable** (1.80+): install via [rustup](https://rustup.rs/)
+- **Rust**: install via [rustup](https://rustup.rs/)
   ```
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
+  The exact toolchain version is pinned in `rust-toolchain.toml` at the workspace root.
+  `rustup` reads this file automatically — no manual version selection needed.
 - **Git**
 
 ## Python bindings (`merutable-python`)
@@ -131,3 +133,31 @@ modules with `pub` visibility (a follow-up sweep tightens to
 ## Adding a dependency
 
 All dependency versions are pinned in the workspace root `Cargo.toml` under `[workspace.dependencies]`. Individual crates reference them with `{ workspace = true }`. Never add version specs in crate-level `Cargo.toml` files.
+
+## MSRV (Minimum Supported Rust Version)
+
+The MSRV is set via `rust-version` in `[workspace.package]` in the root `Cargo.toml`.
+
+### Finding the MSRV
+
+```bash
+cargo install cargo-msrv
+cargo msrv find --min <version>
+```
+
+### Verifying after a dependency upgrade
+
+After bumping a dependency version, check that it still builds with the
+MSRV. The `+<version>` syntax tells cargo to use a specific toolchain
+instead of the default:
+
+```bash
+# Install the MSRV toolchain (one-time)
+rustup install <msrv>
+
+# Build against it
+cargo +<msrv> check
+```
+
+If the build fails, either pin the dependency to its last MSRV-compatible
+version or bump `rust-version` in the workspace root.

@@ -17,6 +17,9 @@ default-members = [
     "crates/merutable",
 ]
 
+[workspace.package]
+rust-version = "1.88.0"
+
 [workspace.dependencies]
 # Parquet / Arrow (arrow-rs monorepo)
 parquet      = { version = "53", features = ["async"] }

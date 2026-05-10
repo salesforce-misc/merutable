@@ -18,9 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+        run: rustup show
 
       - name: Install protoc
         # Issue #28: prost-build needs protoc to compile our internal
@@ -79,7 +77,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: rustup show
 
       - name: Install protoc
         # Issue #28: prost-build needs protoc; ubuntu-latest does not
