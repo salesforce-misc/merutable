@@ -3,10 +3,10 @@
 </p>
 
 <p>
-  <a href="https://github.com/merutable/merutable/actions/workflows/ci.yml"><img src="https://github.com/merutable/merutable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/salesforce-misc/merutable/actions/workflows/ci.yml"><img src="https://github.com/salesforce-misc/merutable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/merutable"><img src="https://img.shields.io/crates/v/merutable.svg" alt="crates.io"></a>
   <a href="https://docs.rs/merutable"><img src="https://docs.rs/merutable/badge.svg" alt="docs.rs"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License"></a>
+  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License"></a>
 </p>
 
 <p><b>An embeddable Rust table engine. LSM writes, Parquet storage, Iceberg-compatible metadata.</b></p>

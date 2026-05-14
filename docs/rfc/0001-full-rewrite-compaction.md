@@ -1,7 +1,7 @@
 # RFC-0001: Stay full-rewrite compaction only
 
 **Status**: Accepted
-**Tracks**: [#19](https://github.com/merutable/merutable/issues/19)
+**Tracks**: [#19](https://github.com/salesforce-misc/merutable/issues/19)
 **Date**: 2026-04-18
 
 ## Decision
@@ -44,7 +44,7 @@ Partial compaction's pitch was usually "produce the Puffin DVs you
 claim to produce." That rationale is voided by the [Issue #17 fix](../../docs/SEMANTICS.md)
 (README corrected to state the read/write asymmetry; DV write-side
 preserved but dormant). The external-reader dedup projection
-([Issue #16](https://github.com/merutable/merutable/issues/16),
+([Issue #16](https://github.com/salesforce-misc/merutable/issues/16),
 [docs/EXTERNAL_READS.md](../EXTERNAL_READS.md)) is mandatory whether or not
 partial compaction is implemented — partial compaction addresses
 write-amp only, not the duplicates external readers see.
@@ -93,9 +93,9 @@ write-amp optimization.
   semantics.
 - The README's Architecture section states compaction is full-
   rewrite, no caveat or "future" language.
-- [Issue #20](https://github.com/merutable/merutable/issues/20) (sort
+- [Issue #20](https://github.com/salesforce-misc/merutable/issues/20) (sort
   order + per-column stats into Iceberg) is independent and proceeds.
-- [Issue #16](https://github.com/merutable/merutable/issues/16)
+- [Issue #16](https://github.com/salesforce-misc/merutable/issues/16)
   (external-reader dedup projection + typed `_seq`/`_op`) is
   independent and proceeds.
 - Chaos testing continues to exercise the full-rewrite path; no new
