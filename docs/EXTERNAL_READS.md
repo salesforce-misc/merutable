@@ -93,7 +93,7 @@ Why this is mandatory:
    with all-NULL non-PK columns.
 
 Engines that recognize the sort-order metadata emitted by
-`db.export_iceberg` (see [#20](https://github.com/merutable/merutable/issues/20))
+`db.export_iceberg` (see [#20](https://github.com/salesforce-misc/merutable/issues/20))
 apply this as a streaming "first row per partition" filter at O(N)
 cost; engines that don't pay an O(N log N) sort. Either way the
 projection is required — the cost difference is only in the plan.
@@ -144,4 +144,4 @@ path rather than re-reading the `version-hint.text` on every query.
 - Apply the dedup projection.
 - Engines that understand merutable's sort order get it for free (O(N));
   engines that don't pay the sort (O(N log N)).
-- Typed `_seq` / `_op` columns are tracked in [#16](https://github.com/merutable/merutable/issues/16).
+- Typed `_seq` / `_op` columns are tracked in [#16](https://github.com/salesforce-misc/merutable/issues/16).
