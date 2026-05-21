@@ -712,6 +712,15 @@ impl IcebergCatalog {
             }
             let src_path = self.base_path.join(&entry.path);
             let dst_path = target.join(&entry.path);
+
+            // Reject path traversal (e.g. "../" in a corrupted manifest).
+            if entry.path.contains("..") {
+                return Err(MeruError::Iceberg(format!(
+                    "path traversal detected in manifest entry: {}",
+                    entry.path
+                )));
+            }
+
             if let Some(parent) = dst_path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await

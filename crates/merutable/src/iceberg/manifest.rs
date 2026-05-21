@@ -127,6 +127,10 @@ pub struct Manifest {
     /// Iceberg v3 row lineage: the next `_row_id` to allocate. Each commit
     /// claims `[next_row_id, next_row_id + added_rows)` and advances this
     /// counter. Initialized to 0 for new tables; monotonically increasing.
+    ///
+    /// NOTE: compaction currently allocates fresh row IDs rather than
+    /// preserving original assignments. This is a known Phase-1
+    /// simplification acceptable for export-only use cases.
     #[serde(default)]
     pub next_row_id: i64,
     /// Iceberg v3 snapshot-level `first-row-id`: the first `_row_id` assigned
