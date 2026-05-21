@@ -1038,7 +1038,7 @@ mod tests {
     /// Write a minimal valid Parquet file at `path` with the standard
     /// merutable column layout (internal + user cols) for export tests.
     fn write_test_parquet(base: &std::path::Path, rel_path: &str, schema: &TableSchema, n: usize) {
-        use arrow::array::{BinaryArray, BooleanArray, Int32Array, Int64Array};
+        use arrow::array::{BinaryArray, Int32Array, Int64Array};
         use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
