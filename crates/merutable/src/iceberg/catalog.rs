@@ -628,10 +628,13 @@ impl IcebergCatalog {
         let target_uri = table_location.clone();
 
         // Copy data files into the export, stripping internal columns.
-        self.copy_data_files_for_export(&manifest, &target).await?;
+        // Returns actual file sizes (post-rewrite) for the Avro manifest.
+        let exported_sizes = self
+            .copy_data_files_for_export(&manifest, &target)
+            .await?;
 
         let manifest_list_avro_path = self
-            .write_iceberg_avro_manifests(&manifest, &table_location, &target_uri)
+            .write_iceberg_avro_manifests(&manifest, &table_location, &target_uri, &exported_sizes)
             .await?;
 
         let mut metadata_value =
@@ -687,17 +690,21 @@ impl IcebergCatalog {
 
     /// Copy live data files into the export directory, projecting only
     /// user-facing columns (stripping `_merutable_*` internal columns).
+    /// Returns a map of `relative_path -> actual_file_size` for the
+    /// rewritten files (sizes differ from originals after column removal).
     async fn copy_data_files_for_export(
         &self,
         manifest: &Manifest,
         target: &Path,
-    ) -> Result<()> {
+    ) -> Result<HashMap<String, u64>> {
         let user_col_names: Vec<String> = manifest
             .schema
             .columns
             .iter()
             .map(|c| c.name.clone())
             .collect();
+
+        let mut exported_sizes = HashMap::new();
 
         for entry in &manifest.entries {
             if entry.status == "deleted" {
@@ -717,39 +724,45 @@ impl IcebergCatalog {
 
             let dst = dst_path.clone();
             let user_cols = user_col_names.clone();
-            let written = tokio::task::spawn_blocking(move || {
-                Self::rewrite_parquet_user_columns_only(&src_bytes, &user_cols, &dst)
+            let written_size = tokio::task::spawn_blocking(move || {
+                Self::rewrite_parquet_user_columns_only(src_bytes, &user_cols, &dst)
             })
             .await
             .map_err(|e| MeruError::Iceberg(format!("export join: {e}")))?;
-            written?;
+            exported_sizes.insert(entry.path.clone(), written_size?);
         }
-        Ok(())
+        Ok(exported_sizes)
     }
 
     /// Read a merutable Parquet file and write a new file containing only
     /// the user-facing columns (those declared in the TableSchema).
+    /// Returns the actual file size of the written output.
     fn rewrite_parquet_user_columns_only(
-        src_bytes: &[u8],
+        src_bytes: Vec<u8>,
         user_col_names: &[String],
         dst_path: &Path,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         use arrow::datatypes::{Field, Schema as ArrowSchema};
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use parquet::arrow::ArrowWriter;
         use parquet::basic::Compression;
         use parquet::file::properties::WriterProperties;
 
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(
-            src_bytes.to_vec(),
-        ))
-        .map_err(|e| MeruError::Iceberg(format!("parquet reader build: {e}")))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(src_bytes))
+            .map_err(|e| MeruError::Iceberg(format!("parquet reader build: {e}")))?;
 
         let file_schema = reader.schema().clone();
 
-        // Build projection indices for user columns only, preserving order.
+        // Build projection: for each schema column, find its Arrow index
+        // in the source file. Columns absent from the file (schema
+        // evolution) are skipped — Iceberg readers fill nulls for missing
+        // optional columns via field-id mapping.
         let mut indices: Vec<usize> = Vec::new();
-        for name in user_col_names {
+        // field_id is the column's 1-based position in the *schema*, not
+        // its position in the projected output. This ensures correct
+        // PARQUET:field_id even when older files lack newer columns.
+        let mut field_ids: Vec<i32> = Vec::new();
+        for (schema_pos, name) in user_col_names.iter().enumerate() {
             if let Some((idx, _)) = file_schema
                 .fields()
                 .iter()
@@ -757,18 +770,15 @@ impl IcebergCatalog {
                 .find(|(_, f)| f.name() == name)
             {
                 indices.push(idx);
+                field_ids.push((schema_pos + 1) as i32);
             }
         }
 
-        // Embed Iceberg field-ids (PARQUET:field_id) so pyiceberg can
-        // correlate physical columns with the Iceberg schema without
-        // requiring a name-mapping property.
         let projected_fields: Vec<std::sync::Arc<Field>> = indices
             .iter()
-            .enumerate()
-            .map(|(pos, &i)| {
+            .zip(field_ids.iter())
+            .map(|(&i, &field_id)| {
                 let original = file_schema.fields()[i].as_ref().clone();
-                let field_id = (pos + 1) as i32;
                 let metadata = std::collections::HashMap::from([(
                     "PARQUET:field_id".to_string(),
                     field_id.to_string(),
@@ -778,6 +788,9 @@ impl IcebergCatalog {
             .collect();
         let projected_schema = std::sync::Arc::new(ArrowSchema::new(projected_fields));
 
+        // ProjectionMask::leaves takes Parquet leaf-column indices. For
+        // flat schemas (all merutable types are primitives) these coincide
+        // with Arrow field indices.
         let mask =
             parquet::arrow::ProjectionMask::leaves(reader.parquet_schema(), indices.clone());
         let batch_reader = reader
@@ -805,7 +818,10 @@ impl IcebergCatalog {
             .close()
             .map_err(|e| MeruError::Iceberg(format!("writer close: {e}")))?;
 
-        Ok(())
+        let actual_size = std::fs::metadata(dst_path)
+            .map_err(MeruError::Io)?
+            .len();
+        Ok(actual_size)
     }
 
     /// Issue #54: write the manifest Avro and manifest-list Avro files
@@ -817,6 +833,7 @@ impl IcebergCatalog {
         manifest: &Manifest,
         table_location: &str,
         target_uri: &str,
+        exported_sizes: &HashMap<String, u64>,
     ) -> Result<String> {
         use std::sync::Arc;
 
@@ -849,15 +866,16 @@ impl IcebergCatalog {
                     "added" => iceberg::spec::ManifestStatus::Added,
                     _ => iceberg::spec::ManifestStatus::Existing,
                 };
-                // Data file paths are absolute URIs rooted at the
-                // catalog's base_path so DuckDB / pyiceberg can
-                // resolve them without knowing the original base.
                 let file_path = format!("{}/{}", table_location.trim_end_matches('/'), e.path);
+                let file_size = exported_sizes
+                    .get(&e.path)
+                    .copied()
+                    .unwrap_or(e.meta.file_size);
                 let data_file = iceberg::spec::DataFileBuilder::default()
                     .content(iceberg::spec::DataContentType::Data)
                     .file_path(file_path)
                     .file_format(iceberg::spec::DataFileFormat::Parquet)
-                    .file_size_in_bytes(e.meta.file_size)
+                    .file_size_in_bytes(file_size)
                     .record_count(e.meta.num_rows)
                     .partition(iceberg::spec::Struct::from_iter(std::iter::empty::<
                         Option<iceberg::spec::Literal>,
@@ -1551,6 +1569,153 @@ mod tests {
         // Verify record counts.
         let total_rows: u64 = data_entries.iter().map(|e| e.record_count()).sum();
         assert_eq!(total_rows, 300, "100 + 200 = 300 rows");
+    }
+
+    /// Regression: exported Parquet files must contain ONLY user columns
+    /// (no _merutable_ikey, _merutable_seq, _merutable_op, _merutable_value).
+    /// Bug: prior to the fix, raw internal-format files were referenced
+    /// directly, causing schema mismatches in pyiceberg/DuckDB/Spark.
+    #[tokio::test]
+    async fn export_parquet_contains_only_user_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema_arc = Arc::new(test_schema());
+        let catalog = IcebergCatalog::open(tmp.path(), test_schema())
+            .await
+            .unwrap();
+
+        write_test_parquet(tmp.path(), "data/L0/a.parquet", &test_schema(), 50);
+
+        let mut txn = SnapshotTransaction::new();
+        txn.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: 9999,
+            num_rows: 50,
+            meta: test_meta(0),
+        });
+        catalog.commit(&txn, schema_arc.clone()).await.unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        catalog.export_to_iceberg(target.path()).await.unwrap();
+
+        // Read the exported Parquet and verify columns
+        let exported = target.path().join("data/L0/a.parquet");
+        assert!(exported.exists(), "exported parquet must exist");
+
+        let file_bytes = std::fs::read(&exported).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            bytes::Bytes::from(file_bytes),
+        )
+        .unwrap();
+        let schema = reader.schema();
+        let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+        assert_eq!(
+            col_names,
+            vec!["id", "val"],
+            "export must contain only user columns, got: {col_names:?}"
+        );
+        // No internal columns
+        for name in &col_names {
+            assert!(
+                !name.starts_with("_merutable"),
+                "internal column leaked: {name}"
+            );
+        }
+    }
+
+    /// Regression: file_size_in_bytes in the Avro manifest must match the
+    /// actual size of the rewritten (column-stripped) Parquet file, not
+    /// the original internal file size.
+    #[tokio::test]
+    async fn export_file_size_matches_actual_rewritten_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema_arc = Arc::new(test_schema());
+        let catalog = IcebergCatalog::open(tmp.path(), test_schema())
+            .await
+            .unwrap();
+
+        write_test_parquet(tmp.path(), "data/L0/a.parquet", &test_schema(), 100);
+        let original_size = std::fs::metadata(tmp.path().join("data/L0/a.parquet"))
+            .unwrap()
+            .len();
+
+        let mut txn = SnapshotTransaction::new();
+        txn.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: original_size,
+            num_rows: 100,
+            meta: test_meta(0),
+        });
+        catalog.commit(&txn, schema_arc.clone()).await.unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        catalog.export_to_iceberg(target.path()).await.unwrap();
+
+        // The rewritten file should be smaller (internal columns stripped)
+        let exported_path = target.path().join("data/L0/a.parquet");
+        let exported_size = std::fs::metadata(&exported_path).unwrap().len();
+        assert!(
+            exported_size < original_size,
+            "exported file ({exported_size}B) should be smaller than original ({original_size}B) \
+             because internal columns are stripped"
+        );
+
+        // Verify the Avro manifest reports the ACTUAL exported size
+        let meta_path = target.path().join("metadata/v1.metadata.json");
+        let meta_bytes = tokio::fs::read(&meta_path).await.unwrap();
+        let tm: iceberg::spec::TableMetadata = serde_json::from_slice(&meta_bytes).unwrap();
+        let snapshot = tm.current_snapshot().unwrap();
+        let file_io = iceberg::io::FileIOBuilder::new_fs_io().build().unwrap();
+        let manifest_list = snapshot.load_manifest_list(&file_io, &tm).await.unwrap();
+        let manifest_file = &manifest_list.entries()[0];
+        let manifest_bytes =
+            tokio::fs::read(manifest_file.manifest_path.strip_prefix("file://").unwrap())
+                .await
+                .unwrap();
+        let manifest = iceberg::spec::Manifest::parse_avro(&manifest_bytes).unwrap();
+        let entry = &manifest.entries()[0];
+
+        assert_eq!(
+            entry.file_size_in_bytes() as u64,
+            exported_size,
+            "Avro manifest file_size_in_bytes must equal actual exported file size"
+        );
+    }
+
+    /// Regression: version-hint.text must exist in BOTH root and metadata/
+    /// so that both spec-compliant readers and DuckDB 1.5+ can find it.
+    #[tokio::test]
+    async fn export_version_hint_in_both_locations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema_arc = Arc::new(test_schema());
+        let catalog = IcebergCatalog::open(tmp.path(), test_schema())
+            .await
+            .unwrap();
+
+        write_test_parquet(tmp.path(), "data/L0/a.parquet", &test_schema(), 10);
+
+        let mut txn = SnapshotTransaction::new();
+        txn.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: 1024,
+            num_rows: 10,
+            meta: test_meta(0),
+        });
+        catalog.commit(&txn, schema_arc.clone()).await.unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        catalog.export_to_iceberg(target.path()).await.unwrap();
+
+        let root_hint = target.path().join("version-hint.text");
+        let meta_hint = target.path().join("metadata/version-hint.text");
+
+        assert!(root_hint.exists(), "root version-hint.text must exist");
+        assert!(meta_hint.exists(), "metadata/version-hint.text must exist");
+
+        let root_content = tokio::fs::read_to_string(&root_hint).await.unwrap();
+        let meta_content = tokio::fs::read_to_string(&meta_hint).await.unwrap();
+        assert_eq!(root_content, meta_content, "both hints must have same content");
+        assert_eq!(root_content.trim(), "1");
     }
 
     /// Issue #28 Phase 3: dual-read. A catalog directory that was
