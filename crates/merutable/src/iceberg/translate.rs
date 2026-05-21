@@ -569,6 +569,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "added".into(),
+            first_row_id: None,
         });
         m.entries.push(ManifestEntry {
             path: "data/L1/b.parquet".into(),
@@ -577,6 +578,7 @@ mod tests {
             dv_offset: Some(4),
             dv_length: Some(24),
             status: "existing".into(),
+            first_row_id: None,
         });
         m.properties
             .insert("merutable.job".into(), "compaction".into());
@@ -661,6 +663,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "deleted".into(),
+            first_row_id: None,
         });
         let v = to_iceberg_v2_table_metadata(&m, "file:///tmp/events");
         let summary = &v["snapshots"][0]["summary"];
@@ -680,6 +683,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "added".into(),
+            first_row_id: None,
         };
         let v = to_iceberg_data_file_v2(&entry);
         assert_eq!(v["status"], 1); // added
@@ -735,6 +739,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "added".into(),
+            first_row_id: None,
         };
         // schema() defines:
         //   col 0 "id"     Int64    required (non-nullable)
@@ -767,6 +772,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "added".into(),
+            first_row_id: None,
         };
         let v = to_iceberg_data_file_v2(&entry);
         assert_eq!(v["data_file"]["value_counts"].as_object().unwrap().len(), 0);
@@ -790,6 +796,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "added".into(),
+            first_row_id: None,
         };
         let v = to_iceberg_data_file_v2(&entry);
         assert_eq!(v["data_file"]["sort_order_id"], 1);

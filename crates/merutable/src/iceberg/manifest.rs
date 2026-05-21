@@ -54,6 +54,11 @@ pub struct ManifestEntry {
     /// Status: "existing", "added", or "deleted".
     #[serde(default = "default_status")]
     pub status: String,
+    /// Iceberg v3 row lineage: first `_row_id` assigned to the first row in
+    /// this file. Rows in this file have IDs in `[first_row_id, first_row_id + num_rows)`.
+    /// `None` for files written before row lineage was enabled (pre-upgrade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_row_id: Option<i64>,
 }
 
 fn default_status() -> String {
@@ -119,6 +124,20 @@ pub struct Manifest {
     /// merutable's per-row `seq_num` (which lives inside `ParquetFileMeta`).
     #[serde(default)]
     pub sequence_number: i64,
+    /// Iceberg v3 row lineage: the next `_row_id` to allocate. Each commit
+    /// claims `[next_row_id, next_row_id + added_rows)` and advances this
+    /// counter. Initialized to 0 for new tables; monotonically increasing.
+    ///
+    /// NOTE: compaction currently allocates fresh row IDs rather than
+    /// preserving original assignments. This is a known Phase-1
+    /// simplification acceptable for export-only use cases.
+    #[serde(default)]
+    pub next_row_id: i64,
+    /// Iceberg v3 snapshot-level `first-row-id`: the first `_row_id` assigned
+    /// in this snapshot's commit. Equal to the predecessor's `next_row_id`.
+    /// Required on every v3 snapshot, even if no ID space was allocated.
+    #[serde(default)]
+    pub first_row_id: i64,
     /// Schema of the table at this snapshot.
     pub schema: TableSchema,
     /// All live file entries (status != "deleted").
@@ -243,6 +262,7 @@ impl Manifest {
                     dv_length: e.dv_length,
                     status: status_code,
                     format: format_i,
+                    first_row_id: e.first_row_id,
                 }
             })
             .collect();
@@ -272,6 +292,8 @@ impl Manifest {
             last_updated_ms: self.last_updated_ms,
             properties,
             last_column_id: self.schema.last_column_id as i32,
+            next_row_id: self.next_row_id,
+            first_row_id: self.first_row_id,
         })
     }
 
@@ -331,6 +353,7 @@ impl Manifest {
                     dv_offset: d.dv_offset,
                     dv_length: d.dv_length,
                     status,
+                    first_row_id: d.first_row_id,
                 })
             })
             .collect();
@@ -342,6 +365,8 @@ impl Manifest {
             snapshot_id: pb.snapshot_id,
             parent_snapshot_id: pb.previous_snapshot_id,
             sequence_number: pb.sequence_number,
+            next_row_id: pb.next_row_id,
+            first_row_id: pb.first_row_id,
             schema,
             entries: entries?,
             properties,
@@ -359,6 +384,8 @@ impl Manifest {
             snapshot_id: 0,
             parent_snapshot_id: None,
             sequence_number: 0,
+            next_row_id: 0,
+            first_row_id: 0,
             schema,
             entries: Vec::new(),
             properties: HashMap::new(),
@@ -377,6 +404,8 @@ impl Manifest {
             snapshot_id: 0,
             parent_snapshot_id: None,
             sequence_number: 0,
+            next_row_id: 0,
+            first_row_id: 0,
             schema,
             entries: Vec::new(),
             properties: HashMap::new(),
@@ -455,8 +484,22 @@ impl Manifest {
             new_entries.push(e);
         }
 
-        // Add new files.
+        // Iceberg v3 row lineage: assign first_row_id to existing files
+        // that predate row lineage (upgraded tables). Per spec, "any null
+        // first_row_id must be assigned via inheritance" in the first commit
+        // after upgrade.
+        let mut cursor = self.next_row_id;
+        for entry in &mut new_entries {
+            if entry.first_row_id.is_none() {
+                entry.first_row_id = Some(cursor);
+                cursor += entry.meta.num_rows as i64;
+            }
+        }
+
+        // Add new files with row ID allocation.
         for add in &txn.adds {
+            let first_row_id = cursor;
+            cursor += add.num_rows as i64;
             new_entries.push(ManifestEntry {
                 path: add.path.clone(),
                 meta: add.meta.clone(),
@@ -464,6 +507,7 @@ impl Manifest {
                 dv_offset: None,
                 dv_length: None,
                 status: "added".to_string(),
+                first_row_id: Some(first_row_id),
             });
         }
 
@@ -496,6 +540,8 @@ impl Manifest {
             // Iceberg sequence number is monotonic — bump by one on every
             // commit, regardless of how many files the transaction touched.
             sequence_number: self.sequence_number + 1,
+            next_row_id: cursor,
+            first_row_id: self.next_row_id,
             schema: self.schema.clone(),
             entries: new_entries,
             properties: props,
@@ -632,6 +678,7 @@ mod tests {
             dv_offset: Some(16),
             dv_length: Some(64),
             status: "added".into(),
+            first_row_id: None,
         });
         m.properties.insert("merutable.job".into(), "flush".into());
 
@@ -725,6 +772,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
         m.entries.push(ManifestEntry {
             path: "data/L0/b.parquet".into(),
@@ -733,6 +781,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
 
         // Compact both into one L1 file.
@@ -763,6 +812,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
 
         let mut txn = SnapshotTransaction::new();
@@ -827,6 +877,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
 
         let mut txn = SnapshotTransaction::new();
@@ -854,6 +905,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
         m.entries.push(ManifestEntry {
             path: "l0_new.parquet".into(),
@@ -862,6 +914,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
         // L1 files — should be sorted by key_min ASC.
         m.entries.push(ManifestEntry {
@@ -871,6 +924,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
         m.entries.push(ManifestEntry {
             path: "l1_a.parquet".into(),
@@ -879,6 +933,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
 
         let v = m.to_version(Arc::new(test_schema()));
@@ -905,6 +960,7 @@ mod tests {
             dv_offset: None,
             dv_length: None,
             status: "existing".into(),
+            first_row_id: None,
         });
 
         let mut txn = SnapshotTransaction::new();
@@ -930,5 +986,221 @@ mod tests {
             msg.contains("conflict"),
             "error must indicate a conflict: {msg}"
         );
+    }
+
+    /// Iceberg v3 row lineage: `apply` must assign monotonically increasing
+    /// `first_row_id` to every file and advance `next_row_id` by the total
+    /// number of rows added across all files in the transaction.
+    #[test]
+    fn apply_assigns_row_lineage() {
+        let m = Manifest::empty(test_schema());
+        assert_eq!(m.next_row_id, 0);
+
+        // Commit 1: add a 100-row file.
+        let mut txn1 = SnapshotTransaction::new();
+        txn1.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: 1024,
+            num_rows: 100,
+            meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
+        });
+        let m2 = m.apply(&txn1, 1, &HashMap::new()).unwrap();
+        assert_eq!(m2.next_row_id, 100);
+        assert_eq!(m2.first_row_id, 0);
+        assert_eq!(m2.entries[0].first_row_id, Some(0));
+
+        // Commit 2: add a 200-row file. Row IDs continue from 100.
+        let mut txn2 = SnapshotTransaction::new();
+        txn2.add_file(IcebergDataFile {
+            path: "data/L0/b.parquet".into(),
+            file_size: 2048,
+            num_rows: 200,
+            meta: test_meta(0, 11, 20, b"\x03", b"\x08"),
+        });
+        let m3 = m2.apply(&txn2, 2, &HashMap::new()).unwrap();
+        assert_eq!(m3.next_row_id, 300);
+        // Snapshot-level first_row_id = predecessor's next_row_id.
+        assert_eq!(m3.first_row_id, 100);
+        let b_entry = m3
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/b.parquet")
+            .unwrap();
+        assert_eq!(b_entry.first_row_id, Some(100));
+        // Existing file retains its original row ID.
+        let a_entry = m3
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/a.parquet")
+            .unwrap();
+        assert_eq!(a_entry.first_row_id, Some(0));
+    }
+
+    /// Row lineage: compaction removes old files and adds new ones. The new
+    /// files get fresh row IDs (since the rows are physically rewritten).
+    /// `next_row_id` never goes backward.
+    #[test]
+    fn apply_row_lineage_through_compaction() {
+        let m = Manifest::empty(test_schema());
+
+        // Add two L0 files (100 + 200 rows).
+        let mut txn1 = SnapshotTransaction::new();
+        txn1.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: 1024,
+            num_rows: 100,
+            meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
+        });
+        txn1.add_file(IcebergDataFile {
+            path: "data/L0/b.parquet".into(),
+            file_size: 2048,
+            num_rows: 200,
+            meta: test_meta(0, 11, 20, b"\x03", b"\x08"),
+        });
+        let m2 = m.apply(&txn1, 1, &HashMap::new()).unwrap();
+        assert_eq!(m2.next_row_id, 300);
+
+        // Compact both into one L1 file with 300 rows.
+        let mut txn2 = SnapshotTransaction::new();
+        txn2.remove_file("data/L0/a.parquet".into());
+        txn2.remove_file("data/L0/b.parquet".into());
+        txn2.add_file(IcebergDataFile {
+            path: "data/L1/merged.parquet".into(),
+            file_size: 3072,
+            num_rows: 300,
+            meta: test_meta(1, 1, 20, b"\x01", b"\x08"),
+        });
+        let m3 = m2.apply(&txn2, 2, &HashMap::new()).unwrap();
+        // New file gets row IDs starting from where we left off (300).
+        assert_eq!(m3.next_row_id, 600);
+        assert_eq!(m3.entries[0].first_row_id, Some(300));
+        assert_eq!(m3.entries[0].path, "data/L1/merged.parquet");
+    }
+
+    /// Row lineage: upgrading a legacy manifest (next_row_id=0, entries
+    /// with first_row_id=None) must assign row IDs to all existing files
+    /// on the first commit.
+    #[test]
+    fn apply_assigns_row_ids_to_legacy_files_on_upgrade() {
+        let mut m = Manifest::empty(test_schema());
+        m.snapshot_id = 5;
+        m.next_row_id = 0;
+        // Simulate legacy files that have no row ID.
+        m.entries.push(ManifestEntry {
+            path: "data/L0/legacy1.parquet".into(),
+            meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
+            dv_path: None,
+            dv_offset: None,
+            dv_length: None,
+            status: "existing".into(),
+            first_row_id: None,
+        });
+        m.entries.push(ManifestEntry {
+            path: "data/L1/legacy2.parquet".into(),
+            meta: test_meta(1, 1, 10, b"\x01", b"\x05"),
+            dv_path: None,
+            dv_offset: None,
+            dv_length: None,
+            status: "existing".into(),
+            first_row_id: None,
+        });
+
+        // First commit after upgrade adds a new file.
+        let mut txn = SnapshotTransaction::new();
+        txn.add_file(IcebergDataFile {
+            path: "data/L0/new.parquet".into(),
+            file_size: 512,
+            num_rows: 50,
+            meta: test_meta(0, 11, 15, b"\x06", b"\x09"),
+        });
+        let m2 = m.apply(&txn, 6, &HashMap::new()).unwrap();
+
+        // Legacy files got row IDs assigned (100 rows each from test_meta).
+        let legacy1 = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/legacy1.parquet")
+            .unwrap();
+        assert_eq!(legacy1.first_row_id, Some(0));
+        let legacy2 = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L1/legacy2.parquet")
+            .unwrap();
+        assert_eq!(legacy2.first_row_id, Some(100));
+        // New file gets IDs after both legacy files.
+        let new_entry = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/new.parquet")
+            .unwrap();
+        assert_eq!(new_entry.first_row_id, Some(200));
+        // next_row_id = 200 (legacy) + 50 (new) = 250.
+        assert_eq!(m2.next_row_id, 250);
+    }
+
+    /// Row lineage round-trips through protobuf serialization.
+    #[test]
+    fn row_lineage_survives_protobuf_roundtrip() {
+        let mut m = Manifest::empty(test_schema());
+        m.snapshot_id = 3;
+        m.next_row_id = 500;
+        m.first_row_id = 300;
+        m.entries.push(ManifestEntry {
+            path: "data/L0/a.parquet".into(),
+            meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
+            dv_path: None,
+            dv_offset: None,
+            dv_length: None,
+            status: "existing".into(),
+            first_row_id: Some(200),
+        });
+
+        let bytes = m.to_protobuf().unwrap();
+        let decoded = Manifest::from_protobuf(&bytes).unwrap();
+        assert_eq!(decoded.next_row_id, 500);
+        assert_eq!(decoded.first_row_id, 300);
+        assert_eq!(decoded.entries[0].first_row_id, Some(200));
+    }
+
+    /// Row lineage round-trips through JSON serialization.
+    #[test]
+    fn row_lineage_survives_json_roundtrip() {
+        let mut m = Manifest::empty(test_schema());
+        m.snapshot_id = 3;
+        m.next_row_id = 500;
+        m.first_row_id = 300;
+        m.entries.push(ManifestEntry {
+            path: "data/L0/a.parquet".into(),
+            meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
+            dv_path: None,
+            dv_offset: None,
+            dv_length: None,
+            status: "existing".into(),
+            first_row_id: Some(200),
+        });
+
+        let json = m.to_json().unwrap();
+        let decoded = Manifest::from_json(&json).unwrap();
+        assert_eq!(decoded.next_row_id, 500);
+        assert_eq!(decoded.first_row_id, 300);
+        assert_eq!(decoded.entries[0].first_row_id, Some(200));
+    }
+
+    /// Legacy JSON manifests with no row lineage fields default to 0/None.
+    #[test]
+    fn legacy_json_without_row_lineage_loads_cleanly() {
+        let json = r#"{
+            "snapshot_id": 5,
+            "schema": {"table_name":"t","columns":[],"primary_key":[]},
+            "entries": [{
+                "path": "data/L0/old.parquet",
+                "meta": {"level":0,"seq_min":1,"seq_max":10,"key_min":"01","key_max":"ff","num_rows":100,"file_size":1024},
+                "status": "existing"
+            }]
+        }"#;
+        let m = Manifest::from_json(json.as_bytes()).unwrap();
+        assert_eq!(m.next_row_id, 0);
+        assert_eq!(m.entries[0].first_row_id, None);
     }
 }

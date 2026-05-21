@@ -127,6 +127,7 @@ mod tests {
                 dv_length: None,
                 status: 1,       // added
                 format: Some(1), // Dual
+                first_row_id: Some(0),
             }],
             delete_files: vec![],
             previous_snapshot_id: Some(41),
@@ -136,6 +137,8 @@ mod tests {
                 .into_iter()
                 .collect(),
             last_column_id: 2,
+            next_row_id: 100,
+            first_row_id: 0,
         }
     }
 
