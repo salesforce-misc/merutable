@@ -157,7 +157,7 @@ impl WalWriter {
     }
 
     pub fn close(self) -> Result<()> {
-        Box::new(self.sink).close()
+        self.sink.close()
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────

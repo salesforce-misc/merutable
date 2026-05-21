@@ -19,7 +19,6 @@ use crate::memtable::iterator::MemEntry;
 use crate::types::{
     key::InternalKey,
     level::{Level, ParquetFileMeta},
-    sequence::SeqNum,
     value::Row,
     MeruError, Result,
 };
@@ -51,7 +50,7 @@ pub async fn run_flush(engine: &Arc<MeruEngine>) -> Result<()> {
 
     let first_seq = immutable.first_seq;
     let last_seq = immutable.last_seq();
-    let read_seq = SeqNum(u64::MAX >> 8); // read everything
+    let read_seq = crate::types::sequence::SEQNUM_MAX;
     info!(
         first_seq = first_seq.0,
         last_seq = last_seq.0,

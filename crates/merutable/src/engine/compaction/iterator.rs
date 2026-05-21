@@ -74,7 +74,6 @@ impl CompactionIterator {
         //   - Drop older versions whose seq < oldest_snapshot_seq.
         let mut deduped: Vec<CompactionEntry> = Vec::new();
         let mut last_uk: Option<Vec<u8>> = None;
-        let mut seen_latest = false;
 
         for entry in all {
             let uk = entry.ikey.user_key_bytes().to_vec();
@@ -90,7 +89,6 @@ impl CompactionIterator {
             }
             // New user key — this is the latest version (always kept).
             last_uk = Some(uk);
-            seen_latest = true;
 
             // Drop tombstones at the bottom level only when no active
             // snapshot reader could need this tombstone to shadow an
@@ -108,7 +106,6 @@ impl CompactionIterator {
 
             deduped.push(entry);
         }
-        let _ = seen_latest; // suppress unused warning
 
         Self {
             entries: deduped,

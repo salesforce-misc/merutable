@@ -1,4 +1,3 @@
-pub mod arena;
 pub mod iterator;
 pub mod manager;
 // Issue #38: see `engine::engine` rationale; the inner
