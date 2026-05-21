@@ -57,12 +57,15 @@ impl<S: MeruStore> MeruStore for CachedStore<S> {
     }
 
     async fn get(&self, path: &str) -> Result<Bytes> {
-        // Check local cache first.
+        // Try local cache first; tolerate ENOENT from races with eviction.
         let cache_file = self.cache_path(path);
-        if cache_file.exists() {
-            self.lru.lock().unwrap().promote(path);
-            let data = tokio::fs::read(&cache_file).await.map_err(MeruError::Io)?;
-            return Ok(Bytes::from(data));
+        match tokio::fs::read(&cache_file).await {
+            Ok(data) => {
+                self.lru.lock().unwrap().promote(path);
+                return Ok(Bytes::from(data));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(MeruError::Io(e)),
         }
 
         // Cache miss: fetch from backend.

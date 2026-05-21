@@ -38,10 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::types::{
-    level::ParquetFileMeta,
-    schema::{ColumnType, TableSchema},
-};
+use crate::types::schema::{ColumnType, TableSchema};
 use serde_json::{json, Value};
 
 use crate::iceberg::manifest::{Manifest, ManifestEntry};
@@ -407,12 +404,6 @@ pub fn to_iceberg_v2_table_metadata_bytes(
     serde_json::to_vec_pretty(&v)
         .map_err(|e| crate::types::MeruError::Iceberg(format!("iceberg metadata serialize: {e}")))
 }
-
-/// Unused summary sanity — kept for type-inferred access to `ParquetFileMeta`.
-/// Prevents the compiler from deciding the import is dead if upstream code
-/// moves bound fields around.
-#[allow(dead_code)]
-fn _meta_touch(_m: &ParquetFileMeta) {}
 
 // ── iceberg-rs Schema construction (Issue #54) ──────────────────────────────
 

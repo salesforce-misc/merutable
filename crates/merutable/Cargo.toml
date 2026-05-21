@@ -46,7 +46,6 @@ crc32fast          = { workspace = true }
 
 # Memtable
 crossbeam-skiplist = { workspace = true }
-bumpalo            = { workspace = true }
 
 # Object store + LRU + checksum
 object_store       = { workspace = true }

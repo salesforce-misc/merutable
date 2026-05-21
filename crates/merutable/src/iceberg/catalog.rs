@@ -711,10 +711,10 @@ impl IcebergCatalog {
             let src_path = self.base_path.join(&entry.path);
             let dst_path = target.join(&entry.path);
 
-            // Reject path traversal (e.g. "../" in a corrupted manifest).
-            if entry.path.contains("..") {
+            // Reject path traversal and absolute paths from corrupted manifests.
+            if entry.path.contains("..") || entry.path.starts_with('/') {
                 return Err(MeruError::Iceberg(format!(
-                    "path traversal detected in manifest entry: {}",
+                    "unsafe path in manifest entry: {}",
                     entry.path
                 )));
             }
@@ -956,8 +956,10 @@ impl IcebergCatalog {
 /// for cleaner error attribution.
 async fn read_manifest_payload(metadata_dir: &std::path::Path, ver: i64) -> Result<Vec<u8>> {
     let pb_path = metadata_dir.join(format!("v{ver}.metadata.pb"));
-    if pb_path.exists() {
-        return tokio::fs::read(&pb_path).await.map_err(MeruError::Io);
+    match tokio::fs::read(&pb_path).await {
+        Ok(data) => return Ok(data),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(MeruError::Io(e)),
     }
     let json_path = metadata_dir.join(format!("v{ver}.metadata.json"));
     tokio::fs::read(&json_path).await.map_err(MeruError::Io)

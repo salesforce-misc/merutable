@@ -86,7 +86,6 @@ impl MirrorConfig {
 pub struct OpenOptions {
     pub schema: TableSchema,
     pub catalog_uri: String,
-    pub object_store_url: String,
     pub wal_dir: PathBuf,
 
     // Memtable
@@ -161,7 +160,6 @@ impl OpenOptions {
         Self {
             schema,
             catalog_uri: String::new(),
-            object_store_url: String::new(),
             wal_dir: ec.wal_dir,
             memtable_size_mb: ec.memtable_size_bytes / (1024 * 1024),
             max_immutable_count: ec.max_immutable_count,
@@ -209,11 +207,6 @@ impl OpenOptions {
 
     pub fn catalog_uri(mut self, uri: impl Into<String>) -> Self {
         self.catalog_uri = uri.into();
-        self
-    }
-
-    pub fn object_store(mut self, url: impl Into<String>) -> Self {
-        self.object_store_url = url.into();
         self
     }
 

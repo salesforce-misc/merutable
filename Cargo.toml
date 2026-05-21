@@ -37,7 +37,6 @@ async-trait  = { version = "0.1" }
 
 # Data structures
 crossbeam-skiplist = { version = "0.1" }
-bumpalo            = { version = "3" }
 arc-swap           = { version = "1" }
 lru                = { version = "0.12" }
 roaring            = { version = "0.10" }

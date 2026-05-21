@@ -137,10 +137,7 @@ fn field_value_to_py(py: Python<'_>, fv: &FieldValue) -> PyResult<PyObject> {
         FieldValue::Int64(v) => Ok(v.into_py(py)),
         FieldValue::Float(v) => Ok(v.into_py(py)),
         FieldValue::Double(v) => Ok(v.into_py(py)),
-        FieldValue::Bytes(b) => {
-            let s = String::from_utf8_lossy(b);
-            Ok(s.into_py(py))
-        }
+        FieldValue::Bytes(b) => Ok(PyBytes::new_bound(py, b).into_py(py)),
     }
 }
 

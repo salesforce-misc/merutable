@@ -73,15 +73,19 @@ impl MeruStore for LocalFileStore {
     }
 
     async fn get_range(&self, path: &str, offset: usize, length: usize) -> Result<Bytes> {
-        let data = self.get(path).await?;
-        if offset + length > data.len() {
-            return Err(MeruError::ObjectStore(format!(
-                "range [{offset}, {}) exceeds file size {}",
-                offset + length,
-                data.len()
-            )));
-        }
-        Ok(data.slice(offset..offset + length))
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let full = self.full_path(path);
+        let mut file = tokio::fs::File::open(&full)
+            .await
+            .map_err(|e| MeruError::ObjectStore(format!("{}: {e}", full.display())))?;
+        file.seek(std::io::SeekFrom::Start(offset as u64))
+            .await
+            .map_err(|e| MeruError::ObjectStore(format!("{}: seek: {e}", full.display())))?;
+        let mut buf = vec![0u8; length];
+        file.read_exact(&mut buf)
+            .await
+            .map_err(|e| MeruError::ObjectStore(format!("{}: read_range: {e}", full.display())))?;
+        Ok(Bytes::from(buf))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
