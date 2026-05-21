@@ -594,33 +594,20 @@ impl IcebergCatalog {
         Ok(())
     }
 
-    /// Export the current catalog snapshot as a complete Apache Iceberg v2
-    /// table: `metadata.json` + manifest-list Avro + manifest Avro.
+    /// Export the current catalog snapshot as a self-contained Apache
+    /// Iceberg v2 table that any Iceberg reader can consume directly.
     ///
-    /// This is the **enabler artifact** for Iceberg interop: it projects
-    /// the in-memory `Manifest` onto the Iceberg v2 `TableMetadata` shape
-    /// (see [`crate::iceberg::translate`]) and writes:
+    /// Writes:
+    /// 1. `{target_dir}/metadata/v{N}.metadata.json`
+    /// 2. `{target_dir}/metadata/snap-{N}-0-{uuid}.avro` (manifest-list)
+    /// 3. `{target_dir}/metadata/{uuid}-m0.avro` (manifest)
+    /// 4. `{target_dir}/metadata/version-hint.text`
+    /// 5. `{target_dir}/version-hint.text`
+    /// 6. `{target_dir}/data/L{n}/{file}.parquet` — user-column-only
+    ///    copies (internal `_merutable_*` columns stripped).
     ///
-    /// 1. `{target_dir}/metadata/v{N}.metadata.json` — Iceberg v2 table
-    ///    metadata referencing the manifest-list.
-    /// 2. `{target_dir}/metadata/snap-{N}-0-{uuid}.avro` — manifest-list
-    ///    Avro file containing one entry per manifest.
-    /// 3. `{target_dir}/metadata/{uuid}-m0.avro` — manifest Avro file
-    ///    listing every live data file.
-    /// 4. `{target_dir}/version-hint.text` — pointer to the latest
-    ///    metadata version.
-    ///
-    /// After this call, a DuckDB `iceberg_scan('{target_dir}')`, pyiceberg,
-    /// Spark, Trino, Snowflake, or Athena client can read the table
-    /// (read-only; data files live under the original `base_path`).
-    ///
-    /// # Path resolution
-    ///
-    /// Data file paths in the manifest Avro are absolute URIs rooted at
-    /// the catalog's `base_path` (e.g. `file:///db/data/L0/a.parquet`).
-    /// Manifest and manifest-list paths are absolute URIs under
-    /// `target_dir`. This allows `target_dir != base_path` — the export
-    /// directory holds Iceberg metadata while data files remain in-place.
+    /// The export is fully self-contained: `location` in metadata.json
+    /// points at `target_dir` and all data file paths resolve there.
     pub async fn export_to_iceberg(&self, target_dir: impl AsRef<Path>) -> Result<PathBuf> {
         let target = target_dir.as_ref().to_path_buf();
         let meta_dir = target.join("metadata");
@@ -628,45 +615,27 @@ impl IcebergCatalog {
             .await
             .map_err(MeruError::Io)?;
 
-        // Snapshot the current manifest under the lock, then release it
-        // so the projection work runs off the critical path.
         let manifest = {
             let guard = self.current.lock().await;
             guard.clone()
         };
 
-        // Use an absolute `file://` URI so downstream Iceberg readers
-        // resolve the table location consistently regardless of cwd.
-        let canonical = tokio::fs::canonicalize(&self.base_path)
-            .await
-            .unwrap_or_else(|_| self.base_path.clone());
-        let table_location = format!("file://{}", canonical.display());
-
-        // Canonical target for Avro file URIs.
+        // table_location = export target so all paths resolve locally.
         let canonical_target = tokio::fs::canonicalize(&target)
             .await
             .unwrap_or_else(|_| target.clone());
-        let target_uri = format!("file://{}", canonical_target.display());
+        let table_location = format!("file://{}", canonical_target.display());
+        let target_uri = table_location.clone();
 
-        // ── Issue #54: Avro manifest + manifest-list ────────────────
+        // Copy data files into the export, stripping internal columns.
+        self.copy_data_files_for_export(&manifest, &target).await?;
 
-        // Write manifest Avro and manifest-list Avro so that downstream
-        // engines (DuckDB iceberg_scan, pyiceberg, Spark) can discover
-        // data files through the standard Iceberg read path.
         let manifest_list_avro_path = self
             .write_iceberg_avro_manifests(&manifest, &table_location, &target_uri)
             .await?;
 
-        // ── metadata.json ───────────────────────────────────────────
-
-        // Build the metadata JSON. The manifest-list path inside the
-        // snapshot must point to the Avro file we just wrote (under
-        // target_dir), not to the default path derived from
-        // table_location.
         let mut metadata_value =
             crate::iceberg::translate::to_iceberg_v2_table_metadata(&manifest, &table_location);
-        // Patch the manifest-list path in the snapshot to point at the
-        // actual Avro file under target_dir.
         if let Some(snap) = metadata_value
             .get_mut("snapshots")
             .and_then(|s| s.as_array_mut())
@@ -682,7 +651,6 @@ impl IcebergCatalog {
         tokio::fs::write(&out_path, &json)
             .await
             .map_err(MeruError::Io)?;
-        // fsync before updating version-hint.
         tokio::fs::File::open(&out_path)
             .await
             .map_err(MeruError::Io)?
@@ -690,24 +658,154 @@ impl IcebergCatalog {
             .await
             .map_err(MeruError::Io)?;
 
-        let hint_path = target.join("version-hint.text");
-        tokio::fs::write(&hint_path, manifest.snapshot_id.to_string())
-            .await
-            .map_err(MeruError::Io)?;
-        tokio::fs::File::open(&hint_path)
-            .await
-            .map_err(MeruError::Io)?
-            .sync_all()
-            .await
-            .map_err(MeruError::Io)?;
+        let hint_content = manifest.snapshot_id.to_string();
+        // Write version-hint to both root and metadata/ for broad compat
+        // (Iceberg spec places it at root; DuckDB 1.5+ reads metadata/).
+        for hint_path in [
+            target.join("version-hint.text"),
+            meta_dir.join("version-hint.text"),
+        ] {
+            tokio::fs::write(&hint_path, &hint_content)
+                .await
+                .map_err(MeruError::Io)?;
+            tokio::fs::File::open(&hint_path)
+                .await
+                .map_err(MeruError::Io)?
+                .sync_all()
+                .await
+                .map_err(MeruError::Io)?;
+        }
 
         info!(
             target = %target.display(),
             snapshot_id = manifest.snapshot_id,
             table_uuid = %manifest.table_uuid,
-            "exported Iceberg v2 table (metadata.json + Avro manifests)"
+            "exported Iceberg v2 table (self-contained)"
         );
         Ok(out_path)
+    }
+
+    /// Copy live data files into the export directory, projecting only
+    /// user-facing columns (stripping `_merutable_*` internal columns).
+    async fn copy_data_files_for_export(
+        &self,
+        manifest: &Manifest,
+        target: &Path,
+    ) -> Result<()> {
+        let user_col_names: Vec<String> = manifest
+            .schema
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+
+        for entry in &manifest.entries {
+            if entry.status == "deleted" {
+                continue;
+            }
+            let src_path = self.base_path.join(&entry.path);
+            let dst_path = target.join(&entry.path);
+            if let Some(parent) = dst_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(MeruError::Io)?;
+            }
+
+            let src_bytes = tokio::fs::read(&src_path)
+                .await
+                .map_err(MeruError::Io)?;
+
+            let dst = dst_path.clone();
+            let user_cols = user_col_names.clone();
+            let written = tokio::task::spawn_blocking(move || {
+                Self::rewrite_parquet_user_columns_only(&src_bytes, &user_cols, &dst)
+            })
+            .await
+            .map_err(|e| MeruError::Iceberg(format!("export join: {e}")))?;
+            written?;
+        }
+        Ok(())
+    }
+
+    /// Read a merutable Parquet file and write a new file containing only
+    /// the user-facing columns (those declared in the TableSchema).
+    fn rewrite_parquet_user_columns_only(
+        src_bytes: &[u8],
+        user_col_names: &[String],
+        dst_path: &Path,
+    ) -> Result<()> {
+        use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::Compression;
+        use parquet::file::properties::WriterProperties;
+
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(
+            src_bytes.to_vec(),
+        ))
+        .map_err(|e| MeruError::Iceberg(format!("parquet reader build: {e}")))?;
+
+        let file_schema = reader.schema().clone();
+
+        // Build projection indices for user columns only, preserving order.
+        let mut indices: Vec<usize> = Vec::new();
+        for name in user_col_names {
+            if let Some((idx, _)) = file_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.name() == name)
+            {
+                indices.push(idx);
+            }
+        }
+
+        // Embed Iceberg field-ids (PARQUET:field_id) so pyiceberg can
+        // correlate physical columns with the Iceberg schema without
+        // requiring a name-mapping property.
+        let projected_fields: Vec<std::sync::Arc<Field>> = indices
+            .iter()
+            .enumerate()
+            .map(|(pos, &i)| {
+                let original = file_schema.fields()[i].as_ref().clone();
+                let field_id = (pos + 1) as i32;
+                let metadata = std::collections::HashMap::from([(
+                    "PARQUET:field_id".to_string(),
+                    field_id.to_string(),
+                )]);
+                std::sync::Arc::new(original.with_metadata(metadata))
+            })
+            .collect();
+        let projected_schema = std::sync::Arc::new(ArrowSchema::new(projected_fields));
+
+        let mask =
+            parquet::arrow::ProjectionMask::leaves(reader.parquet_schema(), indices.clone());
+        let batch_reader = reader
+            .with_projection(mask)
+            .build()
+            .map_err(|e| MeruError::Iceberg(format!("parquet batch reader: {e}")))?;
+
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .build();
+
+        let file = std::fs::File::create(dst_path)
+            .map_err(MeruError::Io)?;
+        let mut writer = ArrowWriter::try_new(file, projected_schema.clone(), Some(props))
+            .map_err(|e| MeruError::Iceberg(format!("arrow writer new: {e}")))?;
+
+        for batch_result in batch_reader {
+            let batch = batch_result
+                .map_err(|e| MeruError::Iceberg(format!("read batch: {e}")))?;
+            writer
+                .write(&batch)
+                .map_err(|e| MeruError::Iceberg(format!("write batch: {e}")))?;
+        }
+        writer
+            .close()
+            .map_err(|e| MeruError::Iceberg(format!("writer close: {e}")))?;
+
+        Ok(())
     }
 
     /// Issue #54: write the manifest Avro and manifest-list Avro files
@@ -917,6 +1015,69 @@ mod tests {
             format: None,
             column_stats: None,
         }
+    }
+
+    /// Write a minimal valid Parquet file at `path` with the standard
+    /// merutable column layout (internal + user cols) for export tests.
+    fn write_test_parquet(base: &std::path::Path, rel_path: &str, schema: &TableSchema, n: usize) {
+        use arrow::array::{BinaryArray, BooleanArray, Int32Array, Int64Array};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc as StdArc;
+
+        let full = base.join(rel_path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+
+        // Build the full merutable schema: _merutable_ikey, _merutable_seq,
+        // _merutable_op, _merutable_value, then user columns.
+        let mut fields = vec![
+            Field::new("_merutable_ikey", DataType::Binary, false),
+            Field::new("_merutable_seq", DataType::Int64, false),
+            Field::new("_merutable_op", DataType::Int32, false),
+            Field::new("_merutable_value", DataType::Binary, false),
+        ];
+        for col in &schema.columns {
+            let dt = match col.col_type {
+                ColumnType::Int64 => DataType::Int64,
+                ColumnType::ByteArray => DataType::Binary,
+                _ => DataType::Binary,
+            };
+            fields.push(Field::new(&col.name, dt, col.nullable));
+        }
+        let arrow_schema = StdArc::new(ArrowSchema::new(fields));
+
+        let ikey: Vec<&[u8]> = (0..n).map(|_| &[0x01u8][..]).collect();
+        let seq: Vec<i64> = (0..n).map(|i| i as i64 + 1).collect();
+        let op: Vec<i32> = vec![1; n];
+        let val: Vec<&[u8]> = (0..n).map(|_| &[0u8][..]).collect();
+
+        let mut columns: Vec<StdArc<dyn arrow::array::Array>> = vec![
+            StdArc::new(BinaryArray::from(ikey)),
+            StdArc::new(Int64Array::from(seq)),
+            StdArc::new(Int32Array::from(op)),
+            StdArc::new(BinaryArray::from(val)),
+        ];
+
+        // User columns: fill with dummy data matching types.
+        for col in &schema.columns {
+            let arr: StdArc<dyn arrow::array::Array> = match col.col_type {
+                ColumnType::Int64 => {
+                    StdArc::new(Int64Array::from((0..n).map(|i| i as i64).collect::<Vec<_>>()))
+                }
+                _ => {
+                    let v: Vec<&[u8]> = (0..n).map(|_| &[0x41u8][..]).collect();
+                    StdArc::new(BinaryArray::from(v))
+                }
+            };
+            columns.push(arr);
+        }
+
+        let batch = RecordBatch::try_new(arrow_schema.clone(), columns).unwrap();
+        let file = std::fs::File::create(&full).unwrap();
+        let mut writer = ArrowWriter::try_new(file, arrow_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
     }
 
     #[tokio::test]
@@ -1220,6 +1381,9 @@ mod tests {
             .await
             .unwrap();
 
+        // Write a real Parquet file so the export can copy it.
+        write_test_parquet(tmp.path(), "data/L0/a.parquet", &test_schema(), 100);
+
         // Commit a file so the exported snapshot isn't empty.
         let mut txn = SnapshotTransaction::new();
         txn.add_file(IcebergDataFile {
@@ -1294,6 +1458,10 @@ mod tests {
             .await
             .unwrap();
 
+        // Write real Parquet files so the export can copy them.
+        write_test_parquet(tmp.path(), "data/L0/a.parquet", &test_schema(), 100);
+        write_test_parquet(tmp.path(), "data/L0/b.parquet", &test_schema(), 200);
+
         // Commit two files so the manifest has multiple entries.
         let mut txn = SnapshotTransaction::new();
         txn.add_file(IcebergDataFile {
@@ -1363,14 +1531,20 @@ mod tests {
         let data_entries = manifest.entries();
         assert_eq!(data_entries.len(), 2, "manifest must list both data files");
 
-        // Verify data file paths point to the catalog's base_path.
-        let canonical_base = tokio::fs::canonicalize(tmp.path()).await.unwrap();
-        let base_uri = format!("file://{}", canonical_base.display());
+        // Verify data file paths point to the export target.
+        let canonical_target = tokio::fs::canonicalize(target.path()).await.unwrap();
+        let target_uri = format!("file://{}", canonical_target.display());
         for entry in data_entries {
             let fp = entry.file_path();
             assert!(
-                fp.starts_with(&base_uri),
-                "data file path must be under the catalog base_path, got: {fp}"
+                fp.starts_with(&target_uri),
+                "data file path must be under the export target, got: {fp}"
+            );
+            // The exported Parquet file must also exist on disk.
+            let local = fp.strip_prefix("file://").unwrap();
+            assert!(
+                std::path::Path::new(local).exists(),
+                "exported data file must exist: {local}"
             );
         }
 
