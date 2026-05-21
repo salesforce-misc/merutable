@@ -138,6 +138,7 @@ mod tests {
                 .collect(),
             last_column_id: 2,
             next_row_id: 100,
+            first_row_id: 0,
         }
     }
 

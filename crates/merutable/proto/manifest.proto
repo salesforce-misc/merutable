@@ -104,6 +104,10 @@ message Manifest {
   // Monotonically increasing; starts at 0 for new tables.
   int64 next_row_id = 12;
 
+  // Iceberg v3 snapshot-level first-row-id: the first _row_id assigned in
+  // this snapshot. Equal to the predecessor's next_row_id.
+  int64 first_row_id = 13;
+
   // Reserve generous headroom for near-term evolution.
-  reserved 13 to 24;
+  reserved 14 to 24;
 }

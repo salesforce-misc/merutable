@@ -129,6 +129,11 @@ pub struct Manifest {
     /// counter. Initialized to 0 for new tables; monotonically increasing.
     #[serde(default)]
     pub next_row_id: i64,
+    /// Iceberg v3 snapshot-level `first-row-id`: the first `_row_id` assigned
+    /// in this snapshot's commit. Equal to the predecessor's `next_row_id`.
+    /// Required on every v3 snapshot, even if no ID space was allocated.
+    #[serde(default)]
+    pub first_row_id: i64,
     /// Schema of the table at this snapshot.
     pub schema: TableSchema,
     /// All live file entries (status != "deleted").
@@ -284,6 +289,7 @@ impl Manifest {
             properties,
             last_column_id: self.schema.last_column_id as i32,
             next_row_id: self.next_row_id,
+            first_row_id: self.first_row_id,
         })
     }
 
@@ -356,6 +362,7 @@ impl Manifest {
             parent_snapshot_id: pb.previous_snapshot_id,
             sequence_number: pb.sequence_number,
             next_row_id: pb.next_row_id,
+            first_row_id: pb.first_row_id,
             schema,
             entries: entries?,
             properties,
@@ -374,6 +381,7 @@ impl Manifest {
             parent_snapshot_id: None,
             sequence_number: 0,
             next_row_id: 0,
+            first_row_id: 0,
             schema,
             entries: Vec::new(),
             properties: HashMap::new(),
@@ -393,6 +401,7 @@ impl Manifest {
             parent_snapshot_id: None,
             sequence_number: 0,
             next_row_id: 0,
+            first_row_id: 0,
             schema,
             entries: Vec::new(),
             properties: HashMap::new(),
@@ -528,6 +537,7 @@ impl Manifest {
             // commit, regardless of how many files the transaction touched.
             sequence_number: self.sequence_number + 1,
             next_row_id: cursor,
+            first_row_id: self.next_row_id,
             schema: self.schema.clone(),
             entries: new_entries,
             properties: props,
@@ -992,6 +1002,7 @@ mod tests {
         });
         let m2 = m.apply(&txn1, 1, &HashMap::new()).unwrap();
         assert_eq!(m2.next_row_id, 100);
+        assert_eq!(m2.first_row_id, 0);
         assert_eq!(m2.entries[0].first_row_id, Some(0));
 
         // Commit 2: add a 200-row file. Row IDs continue from 100.
@@ -1004,6 +1015,8 @@ mod tests {
         });
         let m3 = m2.apply(&txn2, 2, &HashMap::new()).unwrap();
         assert_eq!(m3.next_row_id, 300);
+        // Snapshot-level first_row_id = predecessor's next_row_id.
+        assert_eq!(m3.first_row_id, 100);
         let b_entry = m3.entries.iter().find(|e| e.path == "data/L0/b.parquet").unwrap();
         assert_eq!(b_entry.first_row_id, Some(100));
         // Existing file retains its original row ID.
@@ -1108,6 +1121,7 @@ mod tests {
         let mut m = Manifest::empty(test_schema());
         m.snapshot_id = 3;
         m.next_row_id = 500;
+        m.first_row_id = 300;
         m.entries.push(ManifestEntry {
             path: "data/L0/a.parquet".into(),
             meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
@@ -1121,6 +1135,7 @@ mod tests {
         let bytes = m.to_protobuf().unwrap();
         let decoded = Manifest::from_protobuf(&bytes).unwrap();
         assert_eq!(decoded.next_row_id, 500);
+        assert_eq!(decoded.first_row_id, 300);
         assert_eq!(decoded.entries[0].first_row_id, Some(200));
     }
 
@@ -1130,6 +1145,7 @@ mod tests {
         let mut m = Manifest::empty(test_schema());
         m.snapshot_id = 3;
         m.next_row_id = 500;
+        m.first_row_id = 300;
         m.entries.push(ManifestEntry {
             path: "data/L0/a.parquet".into(),
             meta: test_meta(0, 1, 10, b"\x01", b"\x05"),
@@ -1143,6 +1159,7 @@ mod tests {
         let json = m.to_json().unwrap();
         let decoded = Manifest::from_json(&json).unwrap();
         assert_eq!(decoded.next_row_id, 500);
+        assert_eq!(decoded.first_row_id, 300);
         assert_eq!(decoded.entries[0].first_row_id, Some(200));
     }
 
