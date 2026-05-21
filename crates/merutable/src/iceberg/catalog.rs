@@ -629,9 +629,7 @@ impl IcebergCatalog {
 
         // Copy data files into the export, stripping internal columns.
         // Returns actual file sizes (post-rewrite) for the Avro manifest.
-        let exported_sizes = self
-            .copy_data_files_for_export(&manifest, &target)
-            .await?;
+        let exported_sizes = self.copy_data_files_for_export(&manifest, &target).await?;
 
         let manifest_list_avro_path = self
             .write_iceberg_avro_manifests(&manifest, &table_location, &target_uri, &exported_sizes)
@@ -727,9 +725,7 @@ impl IcebergCatalog {
                     .map_err(MeruError::Io)?;
             }
 
-            let src_bytes = tokio::fs::read(&src_path)
-                .await
-                .map_err(MeruError::Io)?;
+            let src_bytes = tokio::fs::read(&src_path).await.map_err(MeruError::Io)?;
 
             let dst = dst_path.clone();
             let user_cols = user_col_names.clone();
@@ -800,8 +796,7 @@ impl IcebergCatalog {
         // ProjectionMask::leaves takes Parquet leaf-column indices. For
         // flat schemas (all merutable types are primitives) these coincide
         // with Arrow field indices.
-        let mask =
-            parquet::arrow::ProjectionMask::leaves(reader.parquet_schema(), indices.clone());
+        let mask = parquet::arrow::ProjectionMask::leaves(reader.parquet_schema(), indices.clone());
         let batch_reader = reader
             .with_projection(mask)
             .build()
@@ -811,14 +806,12 @@ impl IcebergCatalog {
             .set_compression(Compression::ZSTD(Default::default()))
             .build();
 
-        let file = std::fs::File::create(dst_path)
-            .map_err(MeruError::Io)?;
+        let file = std::fs::File::create(dst_path).map_err(MeruError::Io)?;
         let mut writer = ArrowWriter::try_new(file, projected_schema.clone(), Some(props))
             .map_err(|e| MeruError::Iceberg(format!("arrow writer new: {e}")))?;
 
         for batch_result in batch_reader {
-            let batch = batch_result
-                .map_err(|e| MeruError::Iceberg(format!("read batch: {e}")))?;
+            let batch = batch_result.map_err(|e| MeruError::Iceberg(format!("read batch: {e}")))?;
             writer
                 .write(&batch)
                 .map_err(|e| MeruError::Iceberg(format!("write batch: {e}")))?;
@@ -827,9 +820,7 @@ impl IcebergCatalog {
             .close()
             .map_err(|e| MeruError::Iceberg(format!("writer close: {e}")))?;
 
-        let actual_size = std::fs::metadata(dst_path)
-            .map_err(MeruError::Io)?
-            .len();
+        let actual_size = std::fs::metadata(dst_path).map_err(MeruError::Io)?.len();
         Ok(actual_size)
     }
 
@@ -1089,9 +1080,9 @@ mod tests {
         // User columns: fill with dummy data matching types.
         for col in &schema.columns {
             let arr: StdArc<dyn arrow::array::Array> = match col.col_type {
-                ColumnType::Int64 => {
-                    StdArc::new(Int64Array::from((0..n).map(|i| i as i64).collect::<Vec<_>>()))
-                }
+                ColumnType::Int64 => StdArc::new(Int64Array::from(
+                    (0..n).map(|i| i as i64).collect::<Vec<_>>(),
+                )),
                 _ => {
                     let v: Vec<&[u8]> = (0..n).map(|_| &[0x41u8][..]).collect();
                     StdArc::new(BinaryArray::from(v))
@@ -1723,7 +1714,10 @@ mod tests {
 
         let root_content = tokio::fs::read_to_string(&root_hint).await.unwrap();
         let meta_content = tokio::fs::read_to_string(&meta_hint).await.unwrap();
-        assert_eq!(root_content, meta_content, "both hints must have same content");
+        assert_eq!(
+            root_content, meta_content,
+            "both hints must have same content"
+        );
         assert_eq!(root_content.trim(), "1");
     }
 
@@ -1969,7 +1963,11 @@ mod tests {
         catalog.commit(&txn2, schema.clone()).await.unwrap();
         let m2 = catalog.current_manifest().await;
         assert_eq!(m2.next_row_id, 300);
-        let b_entry = m2.entries.iter().find(|e| e.path == "data/L0/b.parquet").unwrap();
+        let b_entry = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/b.parquet")
+            .unwrap();
         assert_eq!(b_entry.first_row_id, Some(100));
 
         // Reopen from disk and verify row lineage survived.
@@ -1978,9 +1976,17 @@ mod tests {
             .unwrap();
         let m_reopened = catalog2.current_manifest().await;
         assert_eq!(m_reopened.next_row_id, 300);
-        let a_reopened = m_reopened.entries.iter().find(|e| e.path == "data/L0/a.parquet").unwrap();
+        let a_reopened = m_reopened
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/a.parquet")
+            .unwrap();
         assert_eq!(a_reopened.first_row_id, Some(0));
-        let b_reopened = m_reopened.entries.iter().find(|e| e.path == "data/L0/b.parquet").unwrap();
+        let b_reopened = m_reopened
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/b.parquet")
+            .unwrap();
         assert_eq!(b_reopened.first_row_id, Some(100));
 
         // Commit 3 after reopen: row IDs continue from 300.
@@ -1999,7 +2005,11 @@ mod tests {
         catalog2.commit(&txn3, schema.clone()).await.unwrap();
         let m3 = catalog2.current_manifest().await;
         assert_eq!(m3.next_row_id, 350);
-        let c_entry = m3.entries.iter().find(|e| e.path == "data/L0/c.parquet").unwrap();
+        let c_entry = m3
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/c.parquet")
+            .unwrap();
         assert_eq!(c_entry.first_row_id, Some(300));
     }
 }

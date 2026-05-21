@@ -1021,10 +1021,18 @@ mod tests {
         assert_eq!(m3.next_row_id, 300);
         // Snapshot-level first_row_id = predecessor's next_row_id.
         assert_eq!(m3.first_row_id, 100);
-        let b_entry = m3.entries.iter().find(|e| e.path == "data/L0/b.parquet").unwrap();
+        let b_entry = m3
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/b.parquet")
+            .unwrap();
         assert_eq!(b_entry.first_row_id, Some(100));
         // Existing file retains its original row ID.
-        let a_entry = m3.entries.iter().find(|e| e.path == "data/L0/a.parquet").unwrap();
+        let a_entry = m3
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/a.parquet")
+            .unwrap();
         assert_eq!(a_entry.first_row_id, Some(0));
     }
 
@@ -1108,12 +1116,24 @@ mod tests {
         let m2 = m.apply(&txn, 6, &HashMap::new()).unwrap();
 
         // Legacy files got row IDs assigned (100 rows each from test_meta).
-        let legacy1 = m2.entries.iter().find(|e| e.path == "data/L0/legacy1.parquet").unwrap();
+        let legacy1 = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/legacy1.parquet")
+            .unwrap();
         assert_eq!(legacy1.first_row_id, Some(0));
-        let legacy2 = m2.entries.iter().find(|e| e.path == "data/L1/legacy2.parquet").unwrap();
+        let legacy2 = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L1/legacy2.parquet")
+            .unwrap();
         assert_eq!(legacy2.first_row_id, Some(100));
         // New file gets IDs after both legacy files.
-        let new_entry = m2.entries.iter().find(|e| e.path == "data/L0/new.parquet").unwrap();
+        let new_entry = m2
+            .entries
+            .iter()
+            .find(|e| e.path == "data/L0/new.parquet")
+            .unwrap();
         assert_eq!(new_entry.first_row_id, Some(200));
         // next_row_id = 200 (legacy) + 50 (new) = 250.
         assert_eq!(m2.next_row_id, 250);
