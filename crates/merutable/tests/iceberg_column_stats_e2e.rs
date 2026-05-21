@@ -100,6 +100,7 @@ fn writer_stats_propagate_through_iceberg_projection() {
         dv_offset: None,
         dv_length: None,
         status: "added".into(),
+        first_row_id: None,
     };
     let v = to_iceberg_data_file_v2_with_schema(&entry, Some(&schema));
     let df = &v["data_file"];

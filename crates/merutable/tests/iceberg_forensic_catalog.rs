@@ -423,6 +423,7 @@ fn apply_threads_real_dv_location_into_manifest() {
         dv_offset: None,
         dv_length: None,
         status: "existing".into(),
+        first_row_id: None,
     });
 
     let mut txn = SnapshotTransaction::new();

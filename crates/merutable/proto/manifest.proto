@@ -51,9 +51,13 @@ message DataFileRef {
   // File format stamp (Issue #15): 0 = Columnar, 1 = Dual.
   optional int32 format = 13;
 
+  // Iceberg v3 row lineage: first _row_id assigned to rows in this file.
+  // Rows in this file have _row_id in [first_row_id, first_row_id + num_rows).
+  optional int64 first_row_id = 14;
+
   // Reserve space for per-column stats hoist (Issue #20 Part 2b) —
   // will be filled via a submessage repeated field once we wire it.
-  reserved 14 to 20;
+  reserved 15 to 20;
 }
 
 // A delete file reference (placeholder; merutable does not yet
@@ -96,6 +100,10 @@ message Manifest {
   // Issue #25 persistence of schema-chain id.
   int32 last_column_id = 11;
 
+  // Iceberg v3 row lineage: next _row_id to allocate on the next commit.
+  // Monotonically increasing; starts at 0 for new tables.
+  int64 next_row_id = 12;
+
   // Reserve generous headroom for near-term evolution.
-  reserved 12 to 24;
+  reserved 13 to 24;
 }

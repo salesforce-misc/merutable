@@ -1580,4 +1580,78 @@ mod tests {
             "expected orphan detection to fire, got: {msg}"
         );
     }
+
+    /// Iceberg v3 row lineage: commits must assign monotonically increasing
+    /// row IDs to data files, persist them through protobuf, and survive
+    /// catalog reopen from disk.
+    #[tokio::test]
+    async fn row_lineage_persists_through_commit_and_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = Arc::new(test_schema());
+        let catalog = IcebergCatalog::open(tmp.path(), test_schema())
+            .await
+            .unwrap();
+
+        // Commit 1: 100-row file.
+        let mut txn1 = SnapshotTransaction::new();
+        txn1.add_file(IcebergDataFile {
+            path: "data/L0/a.parquet".into(),
+            file_size: 1024,
+            num_rows: 100,
+            meta: test_meta(0),
+        });
+        catalog.commit(&txn1, schema.clone()).await.unwrap();
+        let m1 = catalog.current_manifest().await;
+        assert_eq!(m1.next_row_id, 100);
+        assert_eq!(m1.entries[0].first_row_id, Some(0));
+
+        // Commit 2: 200-row file.
+        let mut txn2 = SnapshotTransaction::new();
+        txn2.add_file(IcebergDataFile {
+            path: "data/L0/b.parquet".into(),
+            file_size: 2048,
+            num_rows: 200,
+            meta: {
+                let mut m = test_meta(0);
+                m.seq_min = 11;
+                m.seq_max = 20;
+                m
+            },
+        });
+        catalog.commit(&txn2, schema.clone()).await.unwrap();
+        let m2 = catalog.current_manifest().await;
+        assert_eq!(m2.next_row_id, 300);
+        let b_entry = m2.entries.iter().find(|e| e.path == "data/L0/b.parquet").unwrap();
+        assert_eq!(b_entry.first_row_id, Some(100));
+
+        // Reopen from disk and verify row lineage survived.
+        let catalog2 = IcebergCatalog::open(tmp.path(), test_schema())
+            .await
+            .unwrap();
+        let m_reopened = catalog2.current_manifest().await;
+        assert_eq!(m_reopened.next_row_id, 300);
+        let a_reopened = m_reopened.entries.iter().find(|e| e.path == "data/L0/a.parquet").unwrap();
+        assert_eq!(a_reopened.first_row_id, Some(0));
+        let b_reopened = m_reopened.entries.iter().find(|e| e.path == "data/L0/b.parquet").unwrap();
+        assert_eq!(b_reopened.first_row_id, Some(100));
+
+        // Commit 3 after reopen: row IDs continue from 300.
+        let mut txn3 = SnapshotTransaction::new();
+        txn3.add_file(IcebergDataFile {
+            path: "data/L0/c.parquet".into(),
+            file_size: 512,
+            num_rows: 50,
+            meta: {
+                let mut m = test_meta(0);
+                m.seq_min = 21;
+                m.seq_max = 25;
+                m
+            },
+        });
+        catalog2.commit(&txn3, schema.clone()).await.unwrap();
+        let m3 = catalog2.current_manifest().await;
+        assert_eq!(m3.next_row_id, 350);
+        let c_entry = m3.entries.iter().find(|e| e.path == "data/L0/c.parquet").unwrap();
+        assert_eq!(c_entry.first_row_id, Some(300));
+    }
 }
